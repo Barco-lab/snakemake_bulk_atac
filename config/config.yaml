@@ -1,0 +1,92 @@
+# =====================================================================
+#  snakemake_bulk_atac 配置（ATAC-seq）
+#  默认配置，所有项目共用，一般不要直接修改。
+#  运行时用 run.sh -c <项目配置> 指定项目配置（不存在时以本文件为模板生成），
+#  项目配置中的参数覆盖这里的值；每次运行实际使用的配置会存档到 <outdir>/logs/run_<时间>/config.yaml
+# =====================================================================
+
+# 样本表（相对 outdir）。run.sh 会根据 fastq 目录自动生成
+samples: samples.tsv
+
+# 物种：references 中的一个 key
+genome: mm10
+
+# ---------------------------------------------------------------------
+# 软件环境（已有 conda 环境的路径）
+# ---------------------------------------------------------------------
+envs:
+  main: /opt/anaconda/envs/in202506             # trim_galore bowtie2 samtools fastqc multiqc homer
+  macs3: /home/LAB/lab_ab_1/.conda/envs/omics   # macs3 deeptools bedtools samtools
+fastqc_java: /usr/bin/java   # in202506 自带的 java 损坏，FastQC 改用系统 java；留空则用环境默认
+
+# 每个任务使用的线程数；总并发由 run.sh -j 控制
+threads:
+  default: 2
+  trim: 4
+  fastqc: 2
+  align: 16
+  filter: 8
+  deeptools: 8
+  motif: 8
+samtools_sort_mem: 2G        # samtools sort 每线程内存
+
+# ---------------------------------------------------------------------
+# 参考基因组（bowtie2 index、blacklist、GTF 的染色体命名必须一致，流程会自动检查）
+#   fasta : HOMER motif 使用
+#   gtf   : 生成 TSS 用于 TSS profile / enrichment
+# ---------------------------------------------------------------------
+references:
+  mm10:
+    bowtie2_index: /data/index/bowtie2/mm10/mm10
+    fasta: /data/index/cellranger/refdata-gex-mm10-2020-A/fasta/genome.fa
+    gtf: /data/index/cellranger/refdata-gex-mm10-2020-A/genes/genes.gtf
+    blacklist: /home/LAB/lab_ab_1/reference/blacklist/mm10-blacklist.v2.bed.gz
+    effective_genome_size: 2652783500
+  hg38:
+    bowtie2_index: ""        # 本机暂无，需要时自行构建（bowtie2-build）后填写
+    fasta: /data/index/cellranger/refdata-gex-GRCh38-2020-A/fasta/genome.fa
+    gtf: /data/index/cellranger/refdata-gex-GRCh38-2020-A/genes/genes.gtf
+    blacklist: /home/LAB/lab_ab_1/reference/blacklist/hg38-blacklist.v2.bed.gz
+    effective_genome_size: 2913022398
+
+# 污染检查：把 reads 再比对到另一个物种，只报告比对率
+contamination:
+  enabled: false
+  genome: hg38             # references 中的 key，需要填写 bowtie2_index
+
+# ---------------------------------------------------------------------
+# 各步骤参数
+# ---------------------------------------------------------------------
+trim:
+  params: "--nextera --quality 20 --max_n 4 --length 30 --phred33"   # --nextera：Tn5 接头
+
+bowtie2:                   # PE 自动追加 --no-mixed --no-discordant
+  params: "--very-sensitive -X 2000"
+
+filter:
+  mapq: 30                 # 替代旧版的 grep -v "XS:i:"
+  mito_name: chrM         # 线粒体 reads 总是去除
+
+macs3:
+  qvalue: 0.01
+  pe: "--keep-dup all"                                          # PE：BAMPE 直接用片段
+  se: "--keep-dup all --nomodel --shift -100 --extsize 200"     # SE：以 Tn5 切点为中心
+
+bigwig:
+  binsize: 10
+  normalize: RPGC          # RPGC | CPM | RPKM | BPM | None
+  se_fragment_length: 200  # SE 数据 --extendReads 的长度
+  extra: ""
+
+qc:
+  tss_profile: true        # TSS profile 与 TSS enrichment
+  tss_flank: 3000
+
+motif:
+  enabled: false           # HOMER，对所有样本的 peak 做 motif 分析
+  size: 200                # summit ± size/2
+  params: ""               # 如 "-nomotif" 只做已知 motif，速度快很多
+
+keep:
+  trimmed_fastq: false     # false 时 trim 后的 fastq 在比对完成后自动删除
+  raw_bam: false           # false 时只保留过滤去重后的 BAM
