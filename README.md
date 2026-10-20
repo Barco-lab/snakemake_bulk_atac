@@ -72,7 +72,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | 去重 | `samtools markdup -r` |
 | macs3 | PE：`-f BAMPE --keep-dup all`（直接用片段）<br>SE：`--nomodel --shift -100 --extsize 200`（以 Tn5 切点为中心） |
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
-| bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域 |
+| bigwig | 默认 CPM 归一化、bin 100bp，并排除 blacklist 区域 |
 | QC | FRiP、TSS enrichment、片段长度分布（核小体周期）、chrM 比例 |
 
 ---
@@ -85,7 +85,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | `contamination` | 污染检查：`enabled: true`，`genome` 默认 `hg38`。**本机目前没有人的 bowtie2 index**，打开前需先构建并填入 `references.hg38.bowtie2_index` |
 | `filter.mapq` | 默认 30 |
 | `macs3.qvalue` | 默认 0.01；`macs3.pe` / `macs3.se` 为 PE / SE 的其余参数 |
-| `bigwig.normalize` | `RPGC`（默认）/ `CPM` / `RPKM` / `BPM` |
+| `bigwig.normalize` | `CPM`（默认）/ `RPGC` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 100 |
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
 
