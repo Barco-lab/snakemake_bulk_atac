@@ -2,6 +2,13 @@
 
 bulk ATAC-seq 本地分析流程（Snakemake ≥ 9.12）。ChIP-seq / CUT&Tag 请用 `pipeline/snakemake_bulk_chip`。
 
+![workflow](docs/images/bulk_atac_workflow.svg)
+
+<sub>实线框为主流程，虚线框为可选或按样本条件执行的步骤，绿色为 QC，★ 为交付结果（路径相对 `results/`）。PNG 版本：`docs/images/bulk_atac_workflow.png`。</sub>
+
+<details>
+<summary>文字版流程</summary>
+
 ```
 fastq ─► trim_galore --nextera ─► bowtie2 ─► 过滤（MAPQ≥30、properly paired、去 chrM）─► 去重 ─► macs3 ─► 去除 blacklist ─► FRiP
              └─ FastQC (raw / trimmed)                                          ├─► bigwig ─► TSS profile / enrichment
@@ -10,6 +17,8 @@ fastq ─► trim_galore --nextera ─► bowtie2 ─► 过滤（MAPQ≥30、pr
                                      可选：污染检查（比对到其它物种）
                                      汇总：summary.tsv + MultiQC 报告
 ```
+
+</details>
 
 ---
 
