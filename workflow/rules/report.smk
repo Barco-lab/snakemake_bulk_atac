@@ -3,7 +3,7 @@
 
 def qc_files():
     """汇总 QC：samtools stats（含片段长度分布）；TSS profile 由 config 控制。"""
-    d = {"stats": expand("results/02_align/stats/{sample}.stats", sample=SAMPLES)}
+    d = {"stats": expand("results/02_align/stats/{sample}.dedup.stats", sample=SAMPLES)}
     if config["qc"]["tss_profile"]:
         d["tss"] = "results/qc/deeptools/tss_profile.tsv"
     return d
@@ -21,7 +21,7 @@ rule summary:
         raw=expand("results/02_align/stats/{sample}.raw.flagstat", sample=SAMPLES),
         idxstats=expand("results/02_align/stats/{sample}.raw.idxstats", sample=SAMPLES),
         filtered=expand("results/02_align/stats/{sample}.filtered.flagstat", sample=SAMPLES),
-        final=expand("results/02_align/stats/{sample}.flagstat", sample=SAMPLES),
+        final=expand("results/02_align/stats/{sample}.dedup.flagstat", sample=SAMPLES),
         frip=expand("results/qc/frip/{sample}.tsv", sample=SAMPLES),
         peaks=[peak_file(s) for s in SAMPLES],
         contam=(
@@ -65,7 +65,7 @@ rule multiqc:
             for r in reads_of(s)
         ],
         bowtie2=expand("results/qc/bowtie2/{sample}.log", sample=SAMPLES),
-        flagstat=expand("results/02_align/stats/{sample}.flagstat", sample=SAMPLES),
+        flagstat=expand("results/02_align/stats/{sample}.dedup.flagstat", sample=SAMPLES),
         peaks=[peak_file(s) for s in SAMPLES],
         summary="results/qc/summary_mqc.tsv",
         config=workflow.source_path("../assets/multiqc_config.yaml"),

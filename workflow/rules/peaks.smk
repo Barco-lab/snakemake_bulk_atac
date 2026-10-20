@@ -12,7 +12,7 @@ def macs3_args(wc):
 
 rule macs3:
     input:
-        treat="results/02_align/{sample}.bam",
+        treat="results/02_align/{sample}.dedup.bam",
     output:
         peak="results/03_peaks/macs3/{sample}/{sample}_peaks.narrowPeak",
     params:
@@ -53,7 +53,7 @@ rule filter_blacklist:
 rule frip:
     """FRiP = 落在 peak 内的 reads / 全部 reads（过滤去重后的 BAM）。"""
     input:
-        bam="results/02_align/{sample}.bam",
+        bam="results/02_align/{sample}.dedup.bam",
         peak=lambda wc: peak_file(wc.sample),
     output:
         "results/qc/frip/{sample}.tsv",

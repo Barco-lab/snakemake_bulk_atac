@@ -15,8 +15,8 @@ def bigwig_args(wc):
 
 rule bigwig:
     input:
-        bam="results/02_align/{sample}.bam",
-        bai="results/02_align/{sample}.bam.bai",
+        bam="results/02_align/{sample}.dedup.bam",
+        bai="results/02_align/{sample}.dedup.bam.bai",
     output:
         "results/04_bigwig/{sample}.bw",
     params:
