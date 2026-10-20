@@ -89,8 +89,9 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
 
-参考文件的染色体命名：bowtie2 mm10 index、cellranger 的 fasta/gtf、blacklist 都是 UCSC 命名（`chr1`）。
-流程启动时会自动检查三者是否一致，结果写在 `results/qc/reference_check.txt`。
+参考文件的染色体命名：bowtie2 mm10 index、blacklist 是 UCSC 命名（`chr1`）；fasta / gtf 与 RNA 流程同源
+（`/data/genome` 下的 Ensembl release-100，命名为 `1` / `MT`），生成 TSS 和 HOMER 输入时自动互转命名。
+流程启动时会自动检查能否对应，结果写在 `results/qc/reference_check.txt`。
 blacklist 的来源和下载记录见 `~/reference/blacklist/download.log`。
 
 ---
