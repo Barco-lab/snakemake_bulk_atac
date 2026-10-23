@@ -1,0 +1,121 @@
+# QC 报告（results/qc/report.html）中各列的说明、参考值与检查规则，由 workflow/scripts/qc_report.py 读取。
+# 文字均为 {zh: 中文, en: English}，报告中可切换。
+#
+# metrics: summary.tsv 的列（不含括号部分）
+#   desc     含义与计算方式（鼠标停在表头上显示）
+#   ref      参考值
+#   sources  出处，对应下方 sources 的键
+#   digits   显示的小数位数（默认 2）
+#   outlier  true 时与本批样本比较：|值 - 中位数| > 3 x MAD（MAD x 1.4826 换算为标准差尺度）标为橙色
+#   checks   有公开阈值的检查。when 限定样本（按 summary.tsv 的列取值），expr 为 Python 表达式，
+#            可直接使用各列名（不含括号部分）；level 为 warn（橙）或 fail（红）
+# rate 以进入该步骤的 reads 为分母（%，见 summary.tsv 表头括号），与各软件报告和 ENCODE 标准口径一致。
+
+metrics:
+  layout:
+    desc: {zh: SE 单端 / PE 双端, en: SE single-end / PE paired-end}
+  raw_reads:
+    desc:
+      zh: trim 前的 reads（trim_galore 报告的 Total reads processed，PE 两个报告相加）
+      en: Reads before trimming (trim_galore "Total reads processed"; R1 + R2 for PE)
+  clean_reads:
+    desc: {zh: 去接头、低质量和过短 reads 后进入 bowtie2 的 reads, en: Reads entering bowtie2 after adapter / quality / length trimming}
+  mapped_reads:
+    desc: {zh: 比对上的 reads（bowtie2 输出 BAM 的 primary mapped）, en: Mapped reads (primary mapped in the bowtie2 BAM)}
+  filtered_reads:
+    desc:
+      zh: MAPQ 过滤、PE 只保留 properly paired、去掉线粒体之后的 reads
+      en: Reads after MAPQ filtering, keeping properly paired reads (PE) and removing mitochondrial reads
+  dedup_reads:
+    desc:
+      zh: 去除 PCR 重复后的 reads，用于 call peak 和 bigwig，即 ENCODE 所说的 non-duplicate、non-mitochondrial aligned reads
+      en: Reads after duplicate removal, used for peaks and bigwig (ENCODE non-duplicate, non-mitochondrial aligned reads)
+    ref:
+      zh: 每个重复 SE ≥ 25M，PE ≥ 50M（即 25M 片段）
+      en: per replicate ≥ 25M (SE) or ≥ 50M reads (PE, i.e. 25M fragments)
+    sources: [ENCODE-ATAC]
+    checks:
+      - when: {layout: SE}
+        expr: dedup_reads < 25e6
+        level: warn
+        message: {zh: 低于 ENCODE 建议的 25M, en: below the ENCODE recommendation of 25M}
+      - when: {layout: PE}
+        expr: dedup_reads < 50e6
+        level: warn
+        message: {zh: 低于 ENCODE 建议的 50M（25M 片段）, en: below the ENCODE recommendation of 50M reads (25M fragments)}
+  clean_rate:
+    desc: {zh: clean_reads / raw_reads（trim 后保留的比例）, en: clean_reads / raw_reads (fraction kept after trimming)}
+    ref: {zh: 无统一标准；明显偏低多为接头二聚体或插入片段过短, en: No consensus threshold; low values usually mean adapter dimers or short inserts}
+    outlier: true
+  mapping_rate:
+    desc: {zh: mapped_reads / clean_reads, en: mapped_reads / clean_reads}
+    ref: {zh: "> 95% 为理想，> 80% 可接受", en: "> 95% expected, > 80% acceptable"}
+    sources: [ENCODE-ATAC]
+    outlier: true
+    checks:
+      - expr: mapping_rate < 80
+        level: fail
+        message: {zh: 比对率低于 ENCODE 可接受标准 80%, en: mapping rate below the ENCODE acceptable level of 80%}
+  mito_rate:
+    desc:
+      zh: 线粒体 reads / mapped_reads（过滤前的 BAM）
+      en: Mitochondrial reads / mapped_reads (before filtering)
+    ref:
+      zh: ENCODE 没有单独阈值（线粒体 reads 不计入测序深度）；不同组织差别很大，与同批样本比较
+      en: No separate ENCODE cutoff (mitochondrial reads are excluded from depth); varies widely by tissue, compare within the batch
+    sources: [ENCODE-ATAC]
+    outlier: true
+  dedup_rate:
+    desc: {zh: dedup_reads / filtered_reads, en: dedup_reads / filtered_reads}
+    ref: {zh: 即 100 − duplicates_rate, en: i.e. 100 − duplicates_rate}
+  duplicates_rate:
+    desc:
+      zh: (filtered_reads − dedup_reads) / filtered_reads，samtools markdup 判定的 PCR 重复比例
+      en: (filtered_reads − dedup_reads) / filtered_reads, PCR duplicates flagged by samtools markdup
+    ref:
+      zh: 无直接阈值；ENCODE 以 NRF > 0.9、PBC1 > 0.9、PBC2 > 3 衡量文库复杂度（本流程未计算）。偏高提示起始量低或测序过饱和
+      en: No direct cutoff; ENCODE measures complexity by NRF > 0.9, PBC1 > 0.9, PBC2 > 3 (not computed here). High values suggest low input or saturation
+    sources: [ENCODE-ATAC]
+    outlier: true
+  peaks:
+    desc:
+      zh: MACS3 call 出的 peak 数（去除 blacklist 区域后，单个样本）
+      en: MACS3 peaks per sample after removing blacklist regions
+    ref:
+      zh: ENCODE 的 > 150,000（replicated peaks）/ > 70,000（IDR peaks）针对合并重复后的 peak 集，与单个样本的 peak 数不能直接比较
+      en: ENCODE's > 150,000 (replicated) / > 70,000 (IDR) apply to replicate-combined peak sets, not to single-sample peaks
+    sources: [ENCODE-ATAC]
+    outlier: true
+  frip:
+    desc: {zh: peak 内的 reads / dedup_reads（比例，0–1）, en: Fraction of dedup_reads in peaks (0–1)}
+    ref:
+      zh: "> 0.3 为理想，> 0.2 可接受。FRiP 依赖 call peak 阈值，本流程（MACS3 q 值）比 ENCODE（p < 0.01）严格，数值会偏低"
+      en: "> 0.3 expected, > 0.2 acceptable. FRiP depends on the peak-calling threshold; MACS3 q-values here are stricter than ENCODE (p < 0.01), so values are lower"
+    sources: [ENCODE-ATAC]
+    digits: 4
+    outlier: true
+    checks:
+      - expr: frip < 0.2
+        level: fail
+        message: {zh: 低于 ENCODE 可接受标准 0.2, en: below the ENCODE acceptable level of 0.2}
+      - expr: 0.2 <= frip < 0.3
+        level: warn
+        message: {zh: 低于 ENCODE 理想值 0.3, en: below the ENCODE expected level of 0.3}
+  tss_enrichment:
+    desc:
+      zh: TSS 中心信号 / 两端背景（deeptools profile，protein_coding 基因的 TSS；窗口见表头）
+      en: TSS centre signal / flank background (deeptools profile over protein_coding TSSs; window in header)
+    ref:
+      zh: ENCODE（mm10 RefSeq TSS）< 10 需关注、10–15 可接受、> 15 理想；GRCh38 RefSeq 分别为 < 5、5–7、> 7。本流程的计算方式和 TSS 集合与 ENCODE 不同，数值仅作参考，主要用于同批比较
+      en: ENCODE (mm10 RefSeq TSS) < 10 concerning, 10–15 acceptable, > 15 ideal; GRCh38 RefSeq < 5, 5–7, > 7. This pipeline uses a different method and TSS set, so compare mainly within the batch
+    sources: [ENCODE-ATAC]
+    outlier: true
+  contamination_rate:
+    desc: {zh: clean reads 比对到污染物种的比例, en: Fraction of clean reads aligning to the contaminant genome}
+    ref: {zh: 无统一标准，与同批样本比较, en: No consensus threshold; compare within the batch}
+    outlier: true
+
+sources:
+  ENCODE-ATAC:
+    name: ENCODE ATAC-seq data standards
+    url: https://www.encodeproject.org/atac-seq/

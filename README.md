@@ -1,5 +1,7 @@
 # snakemake_bulk_atac
 
+**中文** | [English](README.en.md)
+
 bulk ATAC-seq 本地分析流程（Snakemake ≥ 9.12）。ChIP-seq / CUT&Tag 请用 `pipeline/snakemake_bulk_chip`。
 
 ![workflow](docs/images/bulk_atac_workflow.svg)
@@ -15,7 +17,7 @@ fastq ─► trim_galore --nextera ─► bowtie2 ─► 过滤（MAPQ≥30、pr
                                                                                 ├─► samtools stats（片段长度、核小体周期）
                                                                                 └─► HOMER motif（可选）
                                      可选：污染检查（比对到其它物种）
-                                     汇总：summary.tsv + MultiQC 报告
+                                     汇总：summary.tsv + QC 报告 + MultiQC
 ```
 
 </details>
@@ -72,7 +74,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | 去重 | `samtools markdup -r` |
 | macs3 | PE：`-f BAMPE --keep-dup all`（直接用片段）<br>SE：`--nomodel --shift -100 --extsize 200`（以 Tn5 切点为中心） |
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
-| bigwig | 默认 CPM 归一化、bin 100bp，并排除 blacklist 区域 |
+| bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域 |
 | QC | FRiP、TSS enrichment、片段长度分布（核小体周期）、chrM 比例 |
 
 ---
@@ -81,11 +83,11 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 
 | 配置项 | 说明 |
 |---|---|
-| `genome` | `mm10` / `hg38`；每个物种有 `bowtie2_index`、`fasta`（HOMER 用）、`gtf`（TSS 用）、`blacklist`、`effective_genome_size` |
+| `genome` | `mm10` / `hg38`；每个物种有 `bowtie2_index`、`fasta`（HOMER 用）、`gtf`（取 protein_coding 基因的 TSS）、`blacklist`、`effective_genome_size` |
 | `contamination` | 污染检查：`enabled: true`，`genome` 默认 `hg38`。**本机目前没有人的 bowtie2 index**，打开前需先构建并填入 `references.hg38.bowtie2_index` |
 | `filter.mapq` | 默认 30 |
 | `macs3.qvalue` | 默认 0.01；`macs3.pe` / `macs3.se` 为 PE / SE 的其余参数 |
-| `bigwig.normalize` | `CPM`（默认）/ `RPGC` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 100 |
+| `bigwig.normalize` | `RPGC`（默认）/ `CPM` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 10 |
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
 
@@ -102,7 +104,8 @@ blacklist 的来源和下载记录见 `~/reference/blacklist/download.log`。
 project/
 ├── samples.tsv
 ├── results/
-│   ├── tables/summary.tsv               # ★ 每个样本的 reads 数、比对率、chrM 比例、重复率、peak 数、FRiP、TSS enrichment
+│   ├── qc/report.html                   # ★ QC 报告（单文件）：概览、流程与参数、QC 汇总表；指标说明与参考值见 workflow/report/qc_metrics.yaml
+│   ├── qc/summary.tsv                   # 每个样本的 reads 数、比对率、chrM 比例、重复率、peak 数、FRiP、TSS enrichment（纯数字）
 │   ├── 03_peaks/{sample}.narrowPeak     # ★ 已去除 blacklist 的 peak
 │   ├── 03_peaks/macs3/{sample}/         # macs3 原始输出（xls、summits 等）
 │   ├── 04_bigwig/{sample}.bw            # ★
@@ -125,7 +128,7 @@ project/
         └── software_versions.tsv      # 各软件的版本与实际路径
 ```
 
-**summary.tsv 的各列**（reads 按单条 read 计，PE 为 R1 + R2；所有 rate 都以 `raw_reads` 为分母，单位 %；表头括号内为对应的 config 值；reads 数带千位分隔符）：
+**summary.tsv 的各列**（reads 按单条 read 计，PE 为 R1 + R2；rate 以进入该步骤的 reads 为分母，单位 %，与 ENCODE 等公开标准口径一致；表头括号内为对应的 config 值与分母；参考值来自 ENCODE ATAC-seq 标准，详见 `results/qc/report.html`）：
 
 | 列 | 含义 | 参考 |
 |---|---|---|
@@ -133,13 +136,14 @@ project/
 | `mapped_reads` | 比对上的 reads | |
 | `filtered_reads (q30)` | MAPQ（`filter.mapq`）、配对、chrM 过滤后 | |
 | `dedup_reads` | 去重后，用于 call peak 和 bigwig | |
-| `mapping_rate (%)` | mapped_reads / raw_reads | |
-| `dedup_rate (%)` | dedup_reads / raw_reads | |
-| `duplicates_rate (%)` | (filtered_reads − dedup_reads) / raw_reads | |
-| `mito_rate (chrM) (%)` | 线粒体 reads / raw_reads（`filter.mito_name`） | 通常 < 20% 较好 |
-| `peaks` / `frip` | peak 数与 FRiP（peak 内 reads / dedup_reads） | ENCODE：FRiP > 20% |
-| `tss_enrichment (±3000bp)` | TSS 中心信号 / 两端背景（按 deeptools profile 估算，`qc.tss_flank`） | 通常 > 5–7 较好 |
-| `contamination_rate (%)` | 比对到污染物种的 reads / raw_reads（仅 `contamination.enabled` 时输出） | |
+| `clean_rate (% of raw)` | clean_reads / raw_reads | |
+| `mapping_rate (% of clean)` | mapped_reads / clean_reads | > 95% 理想，> 80% 可接受 |
+| `dedup_rate (% of filtered)` | dedup_reads / filtered_reads | dedup_reads：SE ≥ 25M，PE ≥ 50M |
+| `duplicates_rate (% of filtered)` | (filtered_reads − dedup_reads) / filtered_reads | 与同批比较 |
+| `mito_rate (chrM) (% of mapped)` | 线粒体 reads / mapped_reads（`filter.mito_name`） | 无统一阈值，与同批比较 |
+| `peaks` / `frip` | peak 数与 FRiP（peak 内 reads / dedup_reads） | FRiP > 0.3 理想，> 0.2 可接受 |
+| `tss_enrichment (±3000bp)` | TSS 中心信号 / 两端背景（按 deeptools profile 估算，窗口由 `qc.tss_matrix` 决定） | 计算方式与 ENCODE 不同，主要用于同批比较 |
+| `contamination_rate (% of clean)` | clean reads 比对到污染物种的比例（仅 `contamination.enabled` 时输出） | |
 
 ---
 
