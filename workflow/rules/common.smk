@@ -46,6 +46,14 @@ RENAME_CHROMS = str(Path(workflow.basedir) / "scripts/rename_chroms.awk")
 # ============================================================
 # 样本表
 # ============================================================
+REP_SUFFIX = re.compile(r"[._-]?rep\d+$", re.I)  # 与 make_samplesheet.py 一致
+
+
+def infer_group(sample):
+    """group 列为空时按样本名推断：去掉末尾的 _repN，如 Naive_rep1 -> Naive。"""
+    return REP_SUFFIX.sub("", sample) or sample
+
+
 def load_samples(path):
     path = Path(path)
     if not path.exists():
@@ -55,9 +63,11 @@ def load_samples(path):
     for col in ("sample", "fq1"):
         if col not in df.columns:
             raise ValueError(f"样本表缺少必需列 '{col}': {path}")
-    if "fq2" not in df.columns:
-        df["fq2"] = ""
+    for col in ("fq2", "group"):
+        if col not in df.columns:
+            df[col] = ""
     df = df.apply(lambda c: c.str.strip())
+    df["group"] = [g or infer_group(s) for s, g in zip(df["sample"], df["group"])]
 
     errors = []
     dup = df.loc[df["sample"].duplicated(), "sample"].tolist()
@@ -66,6 +76,9 @@ def load_samples(path):
     for s in df["sample"]:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", s):
             errors.append(f"样本名只能包含字母、数字、. _ -（且不能以符号开头）: '{s}'")
+    for g in df["group"].unique():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g):
+            errors.append(f"group 只能包含字母、数字、. _ -（且不能以符号开头）: '{g}'")
     for col in ("fq1", "fq2"):
         df[col] = [
             str((path.parent / p).resolve()) if p and not Path(p).is_absolute() else p
@@ -85,6 +98,10 @@ SAMPLES_DF = load_samples(config["samples"])
 SAMPLES = SAMPLES_DF["sample"].tolist()
 PE_SAMPLES = [s for s in SAMPLES if SAMPLES_DF.loc[s, "fq2"]]
 SE_SAMPLES = [s for s in SAMPLES if not SAMPLES_DF.loc[s, "fq2"]]
+# 分组（按样本表中首次出现的顺序）；REP_GROUPS 为有 ≥ 2 个重复的组
+GROUPS = {g: SAMPLES_DF.index[SAMPLES_DF["group"] == g].tolist() for g in SAMPLES_DF["group"].unique()}
+REP_GROUPS = [g for g, ss in GROUPS.items() if len(ss) >= 2]
+REPLICATES = config["replicates"]
 
 
 def regex_of(names):
@@ -94,6 +111,7 @@ def regex_of(names):
 
 wildcard_constraints:
     sample=regex_of(SAMPLES),
+    group=regex_of(list(GROUPS)),
     read="R1|R2",
 
 
@@ -131,6 +149,9 @@ def all_targets():
         t.append(peak_file(s))
         if config["motif"]["enabled"]:
             t.append(f"results/05_motif/{s}/knownResults.txt")
+    if replicates_on():
+        t += expand("results/03_peaks/reproducible/{group}.bed", group=REP_GROUPS)
+        t += replicate_figure_files()
     t += [
         "results/qc/summary.tsv",
         "results/qc/multiqc/multiqc_report.html",

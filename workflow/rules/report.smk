@@ -127,12 +127,29 @@ def report_settings():
          f"aligned to {CONTAM['genome']}" if CONTAM["enabled"] else "disabled"),
         ("motif", "motif", "HOMER" if c["motif"]["enabled"] else "不分析", "HOMER" if c["motif"]["enabled"] else "disabled"),
     ]
+    r = REPLICATES
+    if replicates_on():
+        lo, hi = r["y_frac"]
+        sex_zh = (f"；性别按 chrY 计数区 `{REF['y_region']}`（chrY 去掉 PAR）的 reads 占全部比对 reads 的比例判定"
+                  f"（< {lo}% 雌性，> {hi}% 雄性）" if r["sex_check"] else "")
+        sex_en = (f"; sex called from the fraction of mapped reads in the chrY region `{REF['y_region']}` (chrY without the PAR; "
+                  f"< {lo}% female, > {hi}% male)" if r["sex_check"] else "")
+        rows.append((
+            "重复一致性", "Replicates",
+            f"{len(GROUPS)} 组（{len(REP_GROUPS)} 组有 ≥ 2 个重复）；reproducible peak 至少出现在 {r['min_reps']} 个重复中；"
+            f"consensus peak 计数的 log2(CPM + 1)，{r['method']} 相关，PCA 取方差最大的 {r['pca_top']} 个 peak" + sex_zh,
+            f"{len(GROUPS)} groups ({len(REP_GROUPS)} with ≥ 2 replicates); reproducible peaks in ≥ {r['min_reps']} replicates; "
+            f"log2(CPM + 1) of consensus peak counts, {r['method']} correlation, PCA on the {r['pca_top']} most variable peaks" + sex_en,
+        ))
+    else:
+        rows.append(("重复一致性", "Replicates", "不分析", "disabled"))
     return rows
 
 
 rule qc_report:
     """单文件 HTML 报告：概览、流程与参数、QC 汇总表（指标说明与参考值见 workflow/report/qc_metrics.yaml）。"""
     input:
+        unpack(lambda wc: replicate_report_inputs()),
         summary="results/qc/summary.tsv",
         multiqc="results/qc/multiqc/multiqc_report.html",
         metrics=workflow.source_path("../report/qc_metrics.yaml"),
@@ -146,6 +163,7 @@ rule qc_report:
         settings=report_settings(),
         qvalue=config["macs3"]["qvalue"],
         multiqc="multiqc/multiqc_report.html",  # 相对 report.html 的路径
+        rep_figures=replicate_figures() if replicates_on() else [],
     log:
         "<logs>/qc_report.log",
     localrule: True

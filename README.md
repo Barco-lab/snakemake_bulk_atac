@@ -17,6 +17,7 @@ fastq ─► trim_galore --nextera ─► bowtie2 ─► 过滤（MAPQ≥30、pr
                                                                                 ├─► samtools stats（片段长度、核小体周期）
                                                                                 └─► HOMER motif（可选）
                                      可选：污染检查（比对到其它物种）
+                                     重复一致性：组内 peak 重现性、consensus peak 相关性与 PCA、性别（chrX / chrY reads 占比）
                                      汇总：summary.tsv + QC 报告 + MultiQC
 ```
 
@@ -40,7 +41,8 @@ bash $P/run.sh -c config.yaml -i /path/to/rawdata -n
 nohup bash $P/run.sh -c config.yaml -j 48 -y > run.log 2>&1 &
 ```
 
-- 不需要激活任何环境，`run.sh` 直接调用 `~/.conda/envs/omics` 中的 snakemake（可用 `SMK_ENV=<环境路径>` 指定其它环境）；macs3 和 deeptools 也使用 `omics` 环境。
+- 不需要激活任何环境，`run.sh` 直接调用 `~/.conda/envs/omics` 中的 snakemake（可用 `SMK_ENV=<环境路径>` 指定其它环境）；macs3 和 deeptools 也使用 `omics` 环境；
+  重复一致性的图用 `in202506` 中的 R（ggplot2）绘制。
 - 流程代码只有一份，所有项目共用；**每个项目用 `-c` 指定自己的配置文件（必填）**。
   流程先读默认配置 `config/config.yaml`，再用 `-c` 的文件覆盖（嵌套的键逐层合并），所以项目配置可以只写与默认不同的参数。
   每次运行实际使用的（合并后的）配置会存档到 `<outdir>/logs/run_<时间>/config.yaml`。
@@ -55,12 +57,13 @@ nohup bash $P/run.sh -c config.yaml -j 48 -y > run.log 2>&1 &
 ## 输入：samples.tsv
 
 ```
-sample      fq1                    fq2
-Naive_rep1  /data/Naive_1_1.fq.gz  /data/Naive_1_2.fq.gz
-Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
+sample      fq1                    fq2                    group
+Naive_rep1  /data/Naive_1_1.fq.gz  /data/Naive_1_2.fq.gz  Naive
+Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 ```
 
 `fq2` 为空即单端。`run.sh -i` 自动识别 `_1/_2`、`_R1/_R2`、`_R1_001/_R2_001`。
+`group`（可选）为重复所属的组，用于重复一致性分析；没有该列或为空时按样本名去掉末尾的 `_repN` 推断（`run.sh -i` 生成时已自动填好，可修改）。
 
 ---
 
@@ -76,6 +79,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
 | bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域 |
 | QC | FRiP、TSS enrichment、片段长度分布（核小体周期）、chrM 比例 |
+| 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；在 ≥ 2 个重复中出现的 reproducible peak；各组 reproducible peak 合并为 consensus peak，featureCounts 计数后以 log2(CPM + 1) 计算相关性、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只在组内比较） |
 
 ---
 
@@ -90,6 +94,8 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz
 | `bigwig.normalize` | `RPGC`（默认）/ `CPM` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 10 |
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
+| `replicates` | 重复一致性：`enabled`；`min_reps`（reproducible peak 至少出现的重复数，默认 2）；`method`（`pearson` / `spearman`）；`pca_top`（默认 500）；`sex_check` 与 `y_frac`（默认 `[0.002, 0.01]`：chrY 计数区 reads 占全部比对 reads < 0.002% 判为雌性、> 0.01% 判为雄性） |
+| `references.<genome>.y_region` | 性别检查统计的 chrY 区域，即 chrY 去掉 PAR（拟常染色体区，X、Y 上序列相同）：mm10 为 `chrY:1-90000000`（PAR 为 chrY:90745845-91644698，PAR 起点上游雌性也有大量 reads，故多留约 745 kb），hg38 为 PAR1 与 PAR2 之间（`chrY:2781480-56887902`）。该区域仍含与 chrX 同源的扩增序列，雌性样本也有少量 reads，因此按阈值判定 |
 
 参考文件的染色体命名：bowtie2 mm10 index、blacklist 是 UCSC 命名（`chr1`）；fasta / gtf 与 RNA 流程同源
 （`/data/genome` 下的 Ensembl release-100，命名为 `1` / `MT`），生成 TSS 和 HOMER 输入时自动互转命名。
@@ -104,10 +110,12 @@ blacklist 的来源和下载记录见 `~/reference/blacklist/download.log`。
 project/
 ├── samples.tsv
 ├── results/
-│   ├── qc/report.html                   # ★ QC 报告（单文件）：概览、流程与参数、QC 汇总表；指标说明与参考值见 workflow/report/qc_metrics.yaml
+│   ├── qc/report.html                   # ★ QC 报告（单文件）：概览、流程与参数、QC 汇总表、重复一致性；指标说明与参考值见 workflow/report/qc_metrics.yaml
 │   ├── qc/summary.tsv                   # 每个样本的 reads 数、比对率、chrM 比例、重复率、peak 数、FRiP、TSS enrichment（纯数字）
 │   ├── 03_peaks/{sample}.narrowPeak     # ★ 已去除 blacklist 的 peak
 │   ├── 03_peaks/macs3/{sample}/         # macs3 原始输出（xls、summits 等）
+│   ├── 03_peaks/reproducible/{group}.bed  # 组内至少在 min_reps 个重复中出现的 peak（第 4 列为重复数）
+│   ├── 03_peaks/consensus.bed           # 各组 reproducible peak 的并集
 │   ├── 04_bigwig/{sample}.bw            # ★
 │   ├── 05_motif/{sample}/               # HOMER（可选）
 │   ├── 02_align/{sample}.dedup.bam      # 过滤去重后的 BAM（{sample}.raw.bam 为 bowtie2 原始比对）；stats/ 下为 flagstat、idxstats、markdup、samtools stats
@@ -117,6 +125,8 @@ project/
 │       ├── multiqc/multiqc_report.html  # ★ 所有 QC 汇总（含片段长度分布）
 │       ├── bowtie2/{sample}.log         # 比对统计
 │       ├── reference_check.txt          # index、blacklist、GTF 染色体命名检查
+│       ├── replicates/                  # 重复一致性：samples.tsv、groups.tsv、peak_overlap.tsv、peak_venn.tsv、correlation.tsv、pca.tsv、
+│       │                                #   peak_counts.tsv（consensus peak 计数矩阵）；figures/ 下为 PDF、PNG（300 dpi）、SVG
 │       └── fastqc_*/  frip/  deeptools/  contamination/
 └── logs/
     └── run_<时间>/                    # 每执行一次 snakemake 新建一个；续跑时只含这次实际跑了的任务
