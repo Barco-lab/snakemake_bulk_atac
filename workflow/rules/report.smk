@@ -92,6 +92,23 @@ rule multiqc:
 
 
 
+def group_bigwig_desc():
+    """QC 报告中组 bigwig 的说明：(中文, 英文)。"""
+    if not BW_GROUP["enabled"]:
+        return "不生成", "disabled"
+    if BW_GROUP["method"] == "merge":
+        zh, en = "合并组内去重后的 BAM 再 `bamCoverage`（参数同上）", "dedup BAMs of each group merged, then `bamCoverage` (same options)"
+    else:
+        zh, en = "各重复的 bigwig 逐 bin 取平均（`bigwigAverage`）", "replicate bigwigs averaged per bin (`bigwigAverage`)"
+    zh += f"；{len(BW_GROUPS)} 个组"
+    en += f"; {len(BW_GROUPS)} groups"
+    excluded = SAMPLES_DF.index[SAMPLES_DF["merge"] == "no"].tolist()
+    if excluded:
+        zh += "；不参与合并：" + "、".join(excluded)
+        en += "; excluded: " + ", ".join(excluded)
+    return zh, en
+
+
 def report_settings():
     """QC 报告「流程与参数」中的参数表：(中文名, 英文名, 中文取值, 英文取值)，取值中 `...` 显示为代码。"""
     c, ref, m = config, REF, config["macs3"]
@@ -121,6 +138,7 @@ def report_settings():
     bw = f"`--binSize {b['binsize']} --normalizeUsing {b['normalize']}`"
     rows += [
         ("bigwig", "bigwig", bw + "，排除 blacklist", bw + ", blacklist excluded"),
+        ("组 bigwig", "Group bigwig", *group_bigwig_desc()),
         ("TSS profile", "TSS profile", f"`{c['qc']['tss_matrix']}`" if c["qc"]["tss_profile"] else "不计算",
          f"`{c['qc']['tss_matrix']}`" if c["qc"]["tss_profile"] else "disabled"),
         ("污染检查", "Contamination", f"比对到 {CONTAM['genome']}" if CONTAM["enabled"] else "不检查",
@@ -137,9 +155,11 @@ def report_settings():
         rows.append((
             "重复一致性", "Replicates",
             f"{len(GROUPS)} 组（{len(REP_GROUPS)} 组有 ≥ 2 个重复）；reproducible peak 至少出现在 {r['min_reps']} 个重复中；"
-            f"consensus peak 计数的 log2(CPM + 1)，{r['method']} 相关，PCA 取方差最大的 {r['pca_top']} 个 peak" + sex_zh,
+            f"consensus peak 由 DiffBind 得到（组内 consensus 取并集，" + (f"峰顶 ± {r['summits']} bp" if r["summits"] else "原宽度") + "）；"
+            f"计数的 log2(CPM + 1)，{r['method']} 相关，PCA 取方差最大的 {r['pca_top']} 个 peak" + sex_zh,
             f"{len(GROUPS)} groups ({len(REP_GROUPS)} with ≥ 2 replicates); reproducible peaks in ≥ {r['min_reps']} replicates; "
-            f"log2(CPM + 1) of consensus peak counts, {r['method']} correlation, PCA on the {r['pca_top']} most variable peaks" + sex_en,
+            f"consensus peaks from DiffBind (union of within-group consensus sets, " + (f"summit ± {r['summits']} bp" if r["summits"] else "merged widths") + "); "
+            f"log2(CPM + 1) of the counts, {r['method']} correlation, PCA on the {r['pca_top']} most variable peaks" + sex_en,
         ))
     else:
         rows.append(("重复一致性", "Replicates", "不分析", "disabled"))

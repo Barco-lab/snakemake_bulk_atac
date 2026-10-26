@@ -127,8 +127,8 @@ replicates:
     desc: {zh: 组内各样本 peak 数的中位数, en: Median peaks per sample in the group}
   reproducible_peaks:
     desc:
-      zh: 各重复的 peak 合并后，至少在 replicates.min_reps 个重复中出现（≥ 1 bp 重叠）的区域数
-      en: Merged regions present (≥ 1 bp overlap) in at least replicates.min_reps replicates
+      zh: DiffBind 组内 consensus（dba.peakset）：各重复的 peak ≥ 1 bp 重叠即合并，至少在 replicates.min_reps 个重复中出现的区域数
+      en: "DiffBind within-group consensus (dba.peakset): peaks overlapping by ≥ 1 bp are merged; regions present in at least replicates.min_reps replicates"
     ref:
       zh: 思路同 ENCODE 的 naive overlap；ENCODE 正式标准用 IDR 与 pseudo-replicate（rescue / self-consistency ratio < 2），本流程未计算
       en: Same idea as the ENCODE naive overlap; the ENCODE standard uses IDR with pseudo-replicates (rescue / self-consistency ratio < 2), not computed here

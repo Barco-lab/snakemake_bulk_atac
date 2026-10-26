@@ -80,7 +80,7 @@ elif [ -f "$outdir/samples.tsv" ]; then
 else
     [ -n "$fq_dir" ] || die "首次运行需要 -i <fq_dir> 或 -s <samples.tsv>"
     [ -d "$fq_dir" ] || die "目录不存在: $fq_dir"
-    "$SMK_ENV/bin/python" "$PIPE_DIR/workflow/scripts/make_samplesheet.py" -i "$fq_dir" -o "$outdir/samples.tsv" --group
+    "$SMK_ENV/bin/python" "$PIPE_DIR/workflow/scripts/make_samplesheet.py" -i "$fq_dir" -o "$outdir/samples.tsv" --group --extra-cols merge
 fi
 echo ">> 配置 $config"
 echo ">> 样本表 $outdir/samples.tsv:"

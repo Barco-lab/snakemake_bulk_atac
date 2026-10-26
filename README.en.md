@@ -64,6 +64,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 
 An empty `fq2` means single-end. `run.sh -i` recognises `_1/_2`, `_R1/_R2` and `_R1_001/_R2_001`.
 `group` (optional) is the group a replicate belongs to, used for the replicate analysis; when the column is missing or empty the group is inferred by removing a trailing `_repN` from the sample name (`run.sh -i` fills it in; edit as needed).
+`merge` (optional) is whether the replicate goes into the group bigwig: empty or `yes` to include, `no` to leave it out (e.g. a replicate flagged by the replicate QC); it only affects the group bigwig, not the reproducible / consensus peaks or the replicate analysis.
 
 ---
 
@@ -79,7 +80,7 @@ An empty `fq2` means single-end. `run.sh -i` recognises `_1/_2`, `_R1/_R2` and `
 | peaks | narrowPeak only, ENCODE blacklist regions removed |
 | bigwig | RPGC normalisation and 10 bp bins by default, blacklist regions excluded |
 | QC | FRiP, TSS enrichment, fragment length distribution (nucleosome pattern), chrM fraction |
-| replicates | Pairwise Jaccard of replicate peaks and Venn diagrams of the bases covered by each replicate combination (bedtools multiinter, groups of 2–4 replicates); reproducible peaks present in ≥ 2 replicates; reproducible peaks of all groups merged into consensus peaks, counted with featureCounts, log2(CPM + 1) for correlation, clustering and PCA; sex inferred from the fraction of mapped reads on chrX and chrY (called from the chrY region; chrX only compared within groups) |
+| replicates | Pairwise Jaccard of replicate peaks and Venn diagrams of the bases covered by each replicate combination (bedtools multiinter, groups of 2–4 replicates); within-group consensus sets from DiffBind (reproducible peaks present in ≥ 2 replicates), merged across groups into consensus peaks and counted with `dba.count` at the summit ± 200 bp, log2(CPM + 1) for correlation, clustering and PCA; sex inferred from the fraction of mapped reads on chrX and chrY (called from the chrY region; chrX only compared within groups) |
 
 ---
 
@@ -92,9 +93,10 @@ An empty `fq2` means single-end. `run.sh -i` recognises `_1/_2`, `_R1/_R2` and `
 | `filter.mapq` | Default 30 |
 | `macs3.qvalue` | Default 0.01; `macs3.pe` / `macs3.se` hold the other PE / SE options |
 | `bigwig.normalize` | `RPGC` (default) / `CPM` / `RPKM` / `BPM` / `None`; `bigwig.binsize` defaults to 10 |
+| `bigwig.group` | One bigwig per group, on by default; `method: merge` (default) merges the group's dedup BAMs and runs `bamCoverage`, `mean` averages the replicate bigwigs with `bigwigAverage` (equal weight per replicate). Only groups with ≥ 2 replicates left after `merge: no` are made.<br>You can first run with `enabled: false`, check the replicate QC, fill in the `merge` column, set `true` and run again: only the merging step is added. Changing the `merge` column later only redoes the affected groups |
 | `motif.enabled` | HOMER motif analysis on the peaks of every sample; `motif.params: "-nomotif"` runs known motifs only and is much faster |
 | `keep.raw_bam` | Default false: only the filtered, deduplicated BAM is kept |
-| `replicates` | Replicate consistency: `enabled`; `min_reps` (replicates a reproducible peak must appear in, default 2); `method` (`pearson` / `spearman`); `pca_top` (default 500); `sex_check` and `y_frac` (default `[0.002, 0.01]`: reads in the chrY region as a percentage of all mapped reads < 0.002% female, > 0.01% male) |
+| `replicates` | Replicate consistency: `enabled`; `min_reps` (replicates a reproducible peak must appear in, default 2); `summits` (DiffBind counts the summit ± this many bp, default 200; `false` keeps the merged widths); `method` (`pearson` / `spearman`); `pca_top` (default 500); `sex_check` and `y_frac` (default `[0.002, 0.01]`: reads in the chrY region as a percentage of all mapped reads < 0.002% female, > 0.01% male) |
 | `references.<genome>.y_region` | chrY region counted for the sex check, i.e. chrY without the pseudoautosomal region (PAR, identical on X and Y): `chrY:1-90000000` for mm10 (the PAR is chrY:90745845-91644698; females also have many reads just upstream of it, so a further ~745 kb is left out), between PAR1 and PAR2 for hg38 (`chrY:2781480-56887902`). The region still contains X-homologous ampliconic sequence, so female samples carry a few reads and the call uses thresholds |
 
 Chromosome naming of the references: the bowtie2 mm10 index and the blacklist use UCSC names (`chr1`); the fasta / gtf come from the same source as the RNA pipeline
@@ -115,8 +117,9 @@ project/
 │   ├── 03_peaks/{sample}.narrowPeak     # ★ peaks with blacklist regions removed
 │   ├── 03_peaks/macs3/{sample}/         # raw macs3 output (xls, summits, etc.)
 │   ├── 03_peaks/reproducible/{group}.bed  # peaks present in at least min_reps replicates (column 4: number of replicates)
-│   ├── 03_peaks/consensus.bed           # union of the reproducible peaks of all groups
+│   ├── 03_peaks/consensus.bed           # union of the reproducible peaks of all groups (DiffBind, summit ± summits bp)
 │   ├── 04_bigwig/{sample}.bw            # ★
+│   ├── 04_bigwig/groups/{group}.bw      # ★ merged bigwig per group
 │   ├── 05_motif/{sample}/               # HOMER (optional)
 │   ├── 02_align/{sample}.dedup.bam      # filtered, deduplicated BAM ({sample}.raw.bam is the raw bowtie2 alignment); stats/ holds flagstat, idxstats, markdup, samtools stats
 │   ├── 01_trim/reports/                 # trim_galore reports
@@ -126,7 +129,7 @@ project/
 │       ├── bowtie2/{sample}.log         # alignment statistics
 │       ├── reference_check.txt          # chromosome naming check of index, blacklist and GTF
 │       ├── replicates/                  # replicate consistency: samples.tsv, groups.tsv, peak_overlap.tsv, peak_venn.tsv, correlation.tsv, pca.tsv,
-│       │                                #   peak_counts.tsv (consensus peak count matrix); figures/ holds PDF, PNG (300 dpi) and SVG
+│       │                                #   peak_counts.tsv (consensus peak count matrix), diffbind.rds (DBA object for differential analysis); figures/ holds PDF, PNG (300 dpi) and SVG
 │       └── fastqc_*/  frip/  deeptools/  contamination/
 └── logs/
     └── run_<time>/                    # one per snakemake run; a resumed run only contains the jobs it actually ran

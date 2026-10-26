@@ -1,4 +1,4 @@
-# 重复一致性：组内 peak 重现性 -> consensus peak 计数 -> 样本相关性、PCA；性别检查（chrX / chrY reads 占比）
+# 重复一致性：组内 peak 重现性 -> consensus peak（DiffBind）与计数 -> 样本相关性、PCA；性别检查（chrX / chrY reads 占比）
 # 分组见 samples.tsv 的 group 列（为空时按样本名去掉 _repN 推断）
 
 
@@ -76,69 +76,39 @@ rule sex_counts:
         """
 
 
-rule reproducible_peaks:
-    """组内各重复的 peak 合并（bedtools merge），保留至少在 min_reps 个重复中出现的区域；第 4 列为重复数。"""
+rule diffbind_consensus:
+    """DiffBind：组内 consensus（至少 min_reps 个重复）-> 各组并集 -> dba.count 计数（narrow 取峰顶 ± summits bp）。"""
     input:
-        lambda wc: [peak_file(s) for s in GROUPS[wc.group]],
+        bams=expand("results/02_align/{sample}.dedup.bam", sample=SAMPLES),
+        bais=expand("results/02_align/{sample}.dedup.bam.bai", sample=SAMPLES),
+        peaks=[peak_file(s) for s in SAMPLES],
     output:
-        "results/03_peaks/reproducible/{group}.bed",
+        reproducible=expand("results/03_peaks/reproducible/{group}.bed", group=REP_GROUPS),
+        consensus="results/03_peaks/consensus.bed",
+        counts="results/qc/replicates/peak_counts.tsv",
+        rds="results/qc/replicates/diffbind.rds",
     params:
-        names=lambda wc: " ".join(GROUPS[wc.group]),
-        n=lambda wc: min(REPLICATES["min_reps"], len(GROUPS[wc.group])),
-    conda:
-        ENV_MACS
-    shell:
-        """
-        names=({params.names}); files=({input})
-        for i in "${{!files[@]}}"; do
-            awk -v OFS='\\t' -v n="${{names[$i]}}" '{{ print $1, $2, $3, n }}' "${{files[$i]}}"
-        done | sort -k1,1 -k2,2n | bedtools merge -i - -c 4 -o count_distinct \
-            | awk -v n={params.n} '$4 >= n' > {output}
-        """
-
-
-rule consensus_peaks:
-    """各组 reproducible peak 的并集；只有一个样本的组用该样本的 peak。"""
-    input:
-        rep=expand("results/03_peaks/reproducible/{group}.bed", group=REP_GROUPS),
-        single=[peak_file(GROUPS[g][0]) for g in GROUPS if g not in REP_GROUPS],
-    output:
-        "results/03_peaks/consensus.bed",
-    conda:
-        ENV_MACS
-    shell:
-        """
-        cat {input.rep} {input.single} | cut -f1-3 | sort -k1,1 -k2,2n | bedtools merge -i - > {output}
-        """
-
-
-rule peak_counts:
-    """每个样本在 consensus peak 上的计数（featureCounts；PE 按片段计）。"""
-    input:
-        bam="results/02_align/{sample}.dedup.bam",
-        bed="results/03_peaks/consensus.bed",
-    output:
-        "results/qc/replicates/counts/{sample}.txt",
-    params:
-        pe=lambda wc: "-p --countReadPairs" if is_pe(wc.sample) else "",
-    threads: threads_for("default")
+        samples=SAMPLES,
+        groups=GROUPS,
+        rep_groups=REP_GROUPS,
+        min_reps=REPLICATES["min_reps"],
+        summits=REPLICATES["summits"],
+        fragment_size=config["bigwig"]["se_fragment_length"],
+    threads: threads_for("deeptools")
     log:
-        "<logs>/peak_counts/{sample}.log",
+        "<logs>/diffbind_consensus.log",
+    benchmark:
+        "<benchmarks>/diffbind_consensus.tsv"
     conda:
-        ENV_MACS
-    shell:
-        """
-        awk -v OFS='\\t' 'BEGIN {{ print "GeneID", "Chr", "Start", "End", "Strand" }}
-            {{ print $1 ":" $2 + 1 "-" $3, $1, $2 + 1, $3, "+" }}' {input.bed} > {output}.saf
-        featureCounts -F SAF -a {output}.saf {params.pe} -T {threads} -o {output} {input.bam} > {log} 2>&1
-        rm {output}.saf
-        """
+        ENV_MAIN
+    script:
+        "../scripts/diffbind_consensus.R"
 
 
 rule replicate_qc:
     """peak 重叠（Jaccard）、相关性、PCA、性别；结果为 tsv，绘图见 replicate_plots。"""
     input:
-        counts=expand("results/qc/replicates/counts/{sample}.txt", sample=SAMPLES),
+        counts="results/qc/replicates/peak_counts.tsv",
         peaks=[peak_file(s) for s in SAMPLES],
         reproducible=expand("results/03_peaks/reproducible/{group}.bed", group=REP_GROUPS),
         consensus="results/03_peaks/consensus.bed",
@@ -154,7 +124,6 @@ rule replicate_qc:
         venn="results/qc/replicates/peak_venn.tsv",
         correlation="results/qc/replicates/correlation.tsv",
         pca="results/qc/replicates/pca.tsv",
-        counts="results/qc/replicates/peak_counts.tsv",
         info="results/qc/replicates/info.json",
     params:
         samples=SAMPLES,
@@ -163,6 +132,7 @@ rule replicate_qc:
         method=REPLICATES["method"],
         pca_top=REPLICATES["pca_top"],
         min_reps=REPLICATES["min_reps"],
+        summits=REPLICATES["summits"],
         y_frac=REPLICATES["y_frac"],
         y_region=REF["y_region"],
         genome=config["genome"],

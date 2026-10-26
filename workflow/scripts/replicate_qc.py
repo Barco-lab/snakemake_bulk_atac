@@ -2,7 +2,7 @@
 重复一致性：
   peak 重现性  组内重复两两比较：Jaccard（bedtools jaccard，按碱基）与 A 的 peak 中与 B 重叠的比例；
               组内各重复组合独有的碱基数（bedtools multiinter，供 Venn 图）
-  相关性 / PCA consensus peak 计数 -> log2(CPM + 1)（CPM 以 consensus peak 内的总计数为分母）
+  相关性 / PCA consensus peak 计数（DiffBind，见 diffbind_consensus.R）-> log2(CPM + 1)（CPM 以 consensus peak 内的总计数为分母）
   性别        chrX、chrY 计数区（y_region，chrY 去掉 PAR）的 reads 占全部比对 reads 的百分比；按 chrY 占比判定
 结果写成 tsv / json，供 replicate_plots.R 绘图和 qc_report.py 使用。
 """
@@ -89,13 +89,7 @@ reproducible = {Path(f).stem: sum(1 for _ in open(f)) for f in snakemake.input.r
 # ------------------------------------------------------------
 # consensus peak 计数 -> log2(CPM + 1) -> 相关性、PCA
 # ------------------------------------------------------------
-cols = []
-for s, f in zip(samples, snakemake.input.counts):
-    d = pd.read_csv(f, sep="\t", comment="#", index_col=0)
-    cols.append(d.iloc[:, -1].rename(s))
-info_cols = d[["Chr", "Start", "End"]]
-counts = pd.concat(cols, axis=1)
-pd.concat([info_cols, counts], axis=1).rename_axis("peak").to_csv(out.counts, sep="\t")
+counts = pd.read_csv(snakemake.input.counts, sep="\t", index_col=0)[samples]
 
 lib = counts.sum()
 logc = np.log2(counts / lib.replace(0, np.nan) * 1e6 + 1).fillna(0)
@@ -162,7 +156,7 @@ for g, ss in groups.items():
 pd.DataFrame(grows).to_csv(out.groups, sep="\t", index=False, float_format="%.4f")
 
 json.dump(dict(
-    method=p.method, min_reps=p.min_reps, consensus_peaks=int(len(counts)), pca_peaks=int(top),
+    method=p.method, min_reps=p.min_reps, consensus_peaks=int(len(counts)), summits=p.summits, pca_peaks=int(top),
     pca_variance=var_exp, sex_check=bool(snakemake.input.sex), y_frac=[lo, hi], y_region=p.y_region, genome=p.genome, mapq=p.mapq,
     groups=groups, rep_groups=list(p.rep_groups),
 ), open(out.info, "w"), indent=1)

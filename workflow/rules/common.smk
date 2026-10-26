@@ -63,11 +63,12 @@ def load_samples(path):
     for col in ("sample", "fq1"):
         if col not in df.columns:
             raise ValueError(f"样本表缺少必需列 '{col}': {path}")
-    for col in ("fq2", "group"):
+    for col in ("fq2", "group", "merge"):
         if col not in df.columns:
             df[col] = ""
     df = df.apply(lambda c: c.str.strip())
     df["group"] = [g or infer_group(s) for s, g in zip(df["sample"], df["group"])]
+    df["merge"] = df["merge"].str.lower()
 
     errors = []
     dup = df.loc[df["sample"].duplicated(), "sample"].tolist()
@@ -79,6 +80,9 @@ def load_samples(path):
     for g in df["group"].unique():
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g):
             errors.append(f"group 只能包含字母、数字、. _ -（且不能以符号开头）: '{g}'")
+    for _, r in df.iterrows():
+        if r["merge"] not in ("", "yes", "no"):
+            errors.append(f"{r['sample']}: merge='{r['merge']}' 无效，可选 yes / no（留空即 yes）")
     for col in ("fq1", "fq2"):
         df[col] = [
             str((path.parent / p).resolve()) if p and not Path(p).is_absolute() else p
@@ -102,6 +106,13 @@ SE_SAMPLES = [s for s in SAMPLES if not SAMPLES_DF.loc[s, "fq2"]]
 GROUPS = {g: SAMPLES_DF.index[SAMPLES_DF["group"] == g].tolist() for g in SAMPLES_DF["group"].unique()}
 REP_GROUPS = [g for g, ss in GROUPS.items() if len(ss) >= 2]
 REPLICATES = config["replicates"]
+
+# 组 bigwig：组内 merge 列不为 no 的样本，≥ 2 个时才生成
+BW_GROUP = config["bigwig"]["group"]
+if BW_GROUP["method"] not in ("merge", "mean"):
+    raise ValueError(f"bigwig.group.method='{BW_GROUP['method']}' 无效，可选 merge / mean")
+BW_GROUPS = {g: [s for s in ss if SAMPLES_DF.loc[s, "merge"] != "no"] for g, ss in GROUPS.items()}
+BW_GROUPS = {g: ss for g, ss in BW_GROUPS.items() if len(ss) >= 2}
 
 
 def regex_of(names):
@@ -149,6 +160,8 @@ def all_targets():
         t.append(peak_file(s))
         if config["motif"]["enabled"]:
             t.append(f"results/05_motif/{s}/knownResults.txt")
+    if BW_GROUP["enabled"]:
+        t += expand("results/04_bigwig/groups/{group}.bw", group=BW_GROUPS)
     if replicates_on():
         t += expand("results/03_peaks/reproducible/{group}.bed", group=REP_GROUPS)
         t += replicate_figure_files()

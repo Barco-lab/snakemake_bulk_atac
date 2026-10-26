@@ -22,7 +22,8 @@ dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 info <- fromJSON(snakemake@input[["info"]])
 per <- read.delim(snakemake@input[["samples"]], check.names = FALSE)
 groups <- names(info$groups)
-per$group <- factor(per$group, levels = groups)
+all_groups <- union(groups, unique(per$group))  # ChIP：control 的组只出现在性别图中
+per$group <- factor(per$group, levels = all_groups)
 
 font <- if ("Arial" %in% systemfonts::system_fonts()$family) "Arial" else "Liberation Sans"
 theme_apa <- theme_minimal(base_size = 10, base_family = font) +
@@ -39,9 +40,9 @@ theme_apa <- theme_minimal(base_size = 10, base_family = font) +
 # 分组：颜色与形状组合，超过 8 组时错开形状，保证组合不重复
 cb_palette <- c("#0077BB", "#33BBEE", "#009988", "#EE7733", "#CC3311", "#EE3377", "#BBBBBB", "#000000")
 shapes <- c(16, 15, 17, 18, 3, 4, 8, 1)
-idx <- seq_along(groups) - 1
-group_col <- setNames(cb_palette[idx %% 8 + 1], groups)
-group_shape <- setNames(shapes[(idx + idx %/% 8) %% 8 + 1], groups)
+idx <- seq_along(all_groups) - 1
+group_col <- setNames(cb_palette[idx %% 8 + 1], all_groups)
+group_shape <- setNames(shapes[(idx + idx %/% 8) %% 8 + 1], all_groups)
 scale_group <- list(
   scale_colour_manual(values = group_col, name = "Group", drop = FALSE),
   scale_shape_manual(values = group_shape, name = "Group", drop = FALSE)

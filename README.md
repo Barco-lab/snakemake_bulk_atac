@@ -64,6 +64,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 
 `fq2` 为空即单端。`run.sh -i` 自动识别 `_1/_2`、`_R1/_R2`、`_R1_001/_R2_001`。
 `group`（可选）为重复所属的组，用于重复一致性分析；没有该列或为空时按样本名去掉末尾的 `_repN` 推断（`run.sh -i` 生成时已自动填好，可修改）。
+`merge`（可选）为该重复是否参与组 bigwig 的合并：留空或 `yes` 参与，`no` 不参与（如重复一致性 QC 发现有问题的重复）；只影响组 bigwig，不影响 reproducible / consensus peak 和重复一致性分析。
 
 ---
 
@@ -79,7 +80,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
 | bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域 |
 | QC | FRiP、TSS enrichment、片段长度分布（核小体周期）、chrM 比例 |
-| 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；在 ≥ 2 个重复中出现的 reproducible peak；各组 reproducible peak 合并为 consensus peak，featureCounts 计数后以 log2(CPM + 1) 计算相关性、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只在组内比较） |
+| 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；用 DiffBind 求各组组内 consensus（在 ≥ 2 个重复中出现的 reproducible peak），各组取并集为 consensus peak，`dba.count` 以峰顶 ± 200 bp 计数后以 log2(CPM + 1) 计算相关性、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只在组内比较） |
 
 ---
 
@@ -92,9 +93,10 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 | `filter.mapq` | 默认 30 |
 | `macs3.qvalue` | 默认 0.01；`macs3.pe` / `macs3.se` 为 PE / SE 的其余参数 |
 | `bigwig.normalize` | `RPGC`（默认）/ `CPM` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 10 |
+| `bigwig.group` | 每组一个 bigwig，默认开启；`method: merge`（默认）合并组内去重后的 BAM 再 `bamCoverage`，`mean` 用 `bigwigAverage` 对各重复的 bigwig 取平均（每个重复权重相同）。只生成去掉 `merge: no` 后仍有 ≥ 2 个重复的组。<br>可以先设 `enabled: false` 只跑单个样本，看过重复一致性后标记 `merge` 列、改为 `true` 再运行，只会新增合并这一步；之后修改 `merge` 列也只重做受影响的组 |
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
-| `replicates` | 重复一致性：`enabled`；`min_reps`（reproducible peak 至少出现的重复数，默认 2）；`method`（`pearson` / `spearman`）；`pca_top`（默认 500）；`sex_check` 与 `y_frac`（默认 `[0.002, 0.01]`：chrY 计数区 reads 占全部比对 reads < 0.002% 判为雌性、> 0.01% 判为雄性） |
+| `replicates` | 重复一致性：`enabled`；`min_reps`（reproducible peak 至少出现的重复数，默认 2）；`summits`（DiffBind 计数时取峰顶 ± 多少 bp，默认 200；`false` 保留原宽度）；`method`（`pearson` / `spearman`）；`pca_top`（默认 500）；`sex_check` 与 `y_frac`（默认 `[0.002, 0.01]`：chrY 计数区 reads 占全部比对 reads < 0.002% 判为雌性、> 0.01% 判为雄性） |
 | `references.<genome>.y_region` | 性别检查统计的 chrY 区域，即 chrY 去掉 PAR（拟常染色体区，X、Y 上序列相同）：mm10 为 `chrY:1-90000000`（PAR 为 chrY:90745845-91644698，PAR 起点上游雌性也有大量 reads，故多留约 745 kb），hg38 为 PAR1 与 PAR2 之间（`chrY:2781480-56887902`）。该区域仍含与 chrX 同源的扩增序列，雌性样本也有少量 reads，因此按阈值判定 |
 
 参考文件的染色体命名：bowtie2 mm10 index、blacklist 是 UCSC 命名（`chr1`）；fasta / gtf 与 RNA 流程同源
@@ -115,8 +117,9 @@ project/
 │   ├── 03_peaks/{sample}.narrowPeak     # ★ 已去除 blacklist 的 peak
 │   ├── 03_peaks/macs3/{sample}/         # macs3 原始输出（xls、summits 等）
 │   ├── 03_peaks/reproducible/{group}.bed  # 组内至少在 min_reps 个重复中出现的 peak（第 4 列为重复数）
-│   ├── 03_peaks/consensus.bed           # 各组 reproducible peak 的并集
+│   ├── 03_peaks/consensus.bed           # 各组 reproducible peak 的并集（DiffBind，峰顶 ± summits bp）
 │   ├── 04_bigwig/{sample}.bw            # ★
+│   ├── 04_bigwig/groups/{group}.bw      # ★ 每组合并后的 bigwig
 │   ├── 05_motif/{sample}/               # HOMER（可选）
 │   ├── 02_align/{sample}.dedup.bam      # 过滤去重后的 BAM（{sample}.raw.bam 为 bowtie2 原始比对）；stats/ 下为 flagstat、idxstats、markdup、samtools stats
 │   ├── 01_trim/reports/                 # trim_galore 报告
@@ -126,7 +129,7 @@ project/
 │       ├── bowtie2/{sample}.log         # 比对统计
 │       ├── reference_check.txt          # index、blacklist、GTF 染色体命名检查
 │       ├── replicates/                  # 重复一致性：samples.tsv、groups.tsv、peak_overlap.tsv、peak_venn.tsv、correlation.tsv、pca.tsv、
-│       │                                #   peak_counts.tsv（consensus peak 计数矩阵）；figures/ 下为 PDF、PNG（300 dpi）、SVG
+│       │                                #   peak_counts.tsv（consensus peak 计数矩阵）、diffbind.rds（DBA 对象，可接着做差异分析）；figures/ 下为 PDF、PNG（300 dpi）、SVG
 │       └── fastqc_*/  frip/  deeptools/  contamination/
 └── logs/
     └── run_<时间>/                    # 每执行一次 snakemake 新建一个；续跑时只含这次实际跑了的任务

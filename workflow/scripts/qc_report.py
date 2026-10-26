@@ -423,6 +423,11 @@ rep_html = ""
 if REP:
     method = "Spearman" if rinfo["method"] == "spearman" else "Pearson"
     n_cons = f"{rinfo['consensus_peaks']:,}"
+    sm = rinfo.get("summits")
+    cons_zh = (f"consensus peak 由 DiffBind 得到：各组组内 consensus（至少 {rinfo['min_reps']} 个重复）取并集，"
+               + (f"dba.count 以全部样本 reads 的峰顶 ± {sm} bp 计数。" if sm else "dba.count 按合并后的原宽度计数。"))
+    cons_en = (f"Consensus peaks come from DiffBind: the union of the within-group consensus sets (≥ {rinfo['min_reps']} replicates), "
+               + (f"counted by dba.count at the summit of the pooled reads ± {sm} bp." if sm else "counted by dba.count over the merged widths."))
     lo, hi = rinfo["y_frac"]
     mm10 = rinfo.get("genome") == "mm10"
     big_groups = [g for g in rinfo["rep_groups"] if len(rinfo["groups"][g]) > 4]
@@ -430,9 +435,9 @@ if REP:
         "correlation": (
             ("样本间相关性", "Sample-to-sample correlation of chromatin accessibility"),
             (f"{method} 相关系数，基于 {n_cons} 个 consensus peak 的 log2(CPM + 1)，按 1 − r 层次聚类（average linkage），"
-             "上方色条为分组。色标为 viridis 顺序色板，范围为最小 r 到 1：样本间相关系数均为正，以 0 为中心的发散色板会浪费一半色阶、难以分辨高相关区间的差异。",
+             f"上方色条为分组。{cons_zh}色标为 viridis 顺序色板，范围为最小 r 到 1：样本间相关系数均为正，以 0 为中心的发散色板会浪费一半色阶、难以分辨高相关区间的差异。",
              f"{method} correlation of log2(CPM + 1) over {n_cons} consensus peaks, clustered by 1 − r (average linkage); the bar on top "
-             "shows the groups. A sequential viridis scale runs from the lowest r to 1: correlations between samples are all positive, so a "
+             f"shows the groups. {cons_en} A sequential viridis scale runs from the lowest r to 1: correlations between samples are all positive, so a "
              "diverging scale centred on 0 would waste half of its range and hide differences among high correlations."),
         ),
         "pca": (
@@ -501,9 +506,9 @@ if REP:
     single = [g for g, n_ in zip(rg["group"], rg["n_samples"]) if n_ < 2]
     rp.append((
         f"分组：{len(rg)} 组，{len(rg) - len(single)} 组有 ≥ 2 个重复" + (f"（只有 1 个样本的组不参与组内比较：{names(single)}）" if single else "")
-        + f"；各组 reproducible peak 合并为 {n_cons} 个 consensus peak，用于相关性和 PCA。",
+        + f"；各组 reproducible peak 取并集为 {n_cons} 个 consensus peak（DiffBind" + (f"，峰顶 ± {sm} bp" if sm else "") + "），用于相关性和 PCA。",
         f"Groups: {len(rg)}, {len(rg) - len(single)} with ≥ 2 replicates" + (f" (single-sample groups are not compared within: {names(single)})" if single else "")
-        + f"; reproducible peaks of all groups form {n_cons} consensus peaks used for correlation and PCA.",
+        + f"; the union of the reproducible peaks of all groups gives {n_cons} consensus peaks (DiffBind" + (f", summit ± {sm} bp" if sm else "") + ") used for correlation and PCA.",
     ))
     if len(reps):
         wc_m, wc_r = rng(reps["within_cor"], 1, 3)
