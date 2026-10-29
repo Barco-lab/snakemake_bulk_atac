@@ -850,7 +850,7 @@ figure.apa { margin: 0 0 20px; }
 .fig-label { font-weight: 700; }
 .fig-title { font-style: italic; margin-bottom: 12px; }
 .fig-img { background: #fff; border-radius: 12px; padding: 8px; max-width: 880px; }
-.fig-img svg { width: 100%; height: auto; display: block; }
+.fig-img svg, .fig-img img { width: 100%; height: auto; display: block; }
 figure.apa figcaption { margin-top: 12px; font-size: 13px; max-width: 880px; }
 .dl { margin-top: 6px; }
 @media (max-width: 860px) {
