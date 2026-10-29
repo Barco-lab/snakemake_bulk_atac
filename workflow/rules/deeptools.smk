@@ -1,48 +1,76 @@
-# bigwig 与 deeptools QC：TSS profile / TSS enrichment
+# bigwig 与 deeptools QC：TSS enrichment、meta gene profile、全基因组 bin 信号
+# bigwig 每种归一化一份（bigwig.normalize，见 common.smk 的 BW_TAGS）；DESeq2 size factor 的两种方式先算 size factor
+# 报告中的 profile 图由 profile_plots.R 根据 deeptools 输出的数据表绘制
 
 
-def bigwig_args(samples):
+def extend_args(samples):
+    # PE 按真实片段延伸；SE 延伸到估计片段长度（PE、SE 合并时 PE 仍按真实片段）
     b = config["bigwig"]
-    args = f"--binSize {b['binsize']} --normalizeUsing {b['normalize']}"
-    if b["normalize"] == "RPGC":
-        args += f" --effectiveGenomeSize {REF['effective_genome_size']}"
+    return "--extendReads" if all(is_pe(s) for s in samples) else f"--extendReads {b['se_fragment_length']}"
+
+
+def bigwig_args(samples, tag, sf_table=None):
+    """bamCoverage 参数；size factor 方式为 --normalizeUsing None --scaleFactor 1 / Σ size factor（组 bigwig 为组内之和，
+    即组内各样本归一化信号的平均），size factor 在运行时从 sf_table 读取。"""
+    b = config["bigwig"]
+    norm = BW_NORM_OF[tag]
+    if norm in BW_SF:
+        names = ",".join(samples)
+        args = ("--normalizeUsing None --scaleFactor "
+                f"$(awk -F'\\t' -v s={names} 'BEGIN {{n = split(s, a, \",\"); for (i = 1; i <= n; i++) w[a[i]] = 1}} "
+                f"w[$1] {{t += $2}} END {{printf \"%.6g\", 1 / t}}' {sf_table})")
+    else:
+        args = f"--normalizeUsing {norm}"
+        if norm == "RPGC":
+            args += f" --effectiveGenomeSize {REF['effective_genome_size']}"
+    args = f"--binSize {b['binsize']} {args}"
     if REF.get("blacklist"):
         args += f" --blackListFileName {REF['blacklist']}"
-    # PE 按真实片段延伸；SE 延伸到估计片段长度（PE、SE 合并时 PE 仍按真实片段）
-    args += " --extendReads" if all(is_pe(s) for s in samples) else f" --extendReads {b['se_fragment_length']}"
-    return f"{args} {b['extra']}"
+    return f"{args} {extend_args(samples)} {b['extra']}"
+
+
+def sf_input(wc):
+    """size factor 方式的 bigwig 需要 size factor 表。"""
+    return {"sf": f"results/04_bigwig/size_factors.{wc.norm}.tsv"} if BW_NORM_OF[wc.norm] in BW_SF else {}
 
 
 def group_bigwig_cmd(wc, input):
     """merge：合并后的 BAM 按单样本参数 bamCoverage；mean：各重复的 bigwig 逐 bin 取平均。"""
     if BW_GROUP["method"] == "merge":
-        return f"bamCoverage -b {input.bam} {bigwig_args(BW_GROUPS[wc.group])}"
+        return f"bamCoverage -b {input.bam} {bigwig_args(BW_GROUPS[wc.group], wc.norm, input.get('sf'))}"
     args = f"--binSize {config['bigwig']['binsize']}"
     if REF.get("blacklist"):
         args += f" --blackListFileName {REF['blacklist']}"
     return f"bigwigAverage -b {' '.join(input.bw)} {args}"
 
 
+def profile_plot_args(n):
+    """plotProfile 画在一张图上；图高随曲线数增加（cm），图例放在右上角（TES 一侧信号低）。"""
+    return (f"--perGroup --plotHeight {max(7, round(0.8 * n, 1))} --plotWidth 12 "
+            "--legendLocation upper-right --regionsLabel 'protein-coding genes'")
+
+
 def group_bigwig_input(wc):
     if BW_GROUP["method"] == "merge":
         bam = f"results/04_bigwig/groups/{wc.group}.merged.bam"
-        return {"bam": bam, "bai": f"{bam}.bai"}
-    return {"bw": expand("results/04_bigwig/{sample}.bw", sample=BW_GROUPS[wc.group])}
+        return {"bam": bam, "bai": f"{bam}.bai", **sf_input(wc)}
+    return {"bw": sample_bw(wc.norm, BW_GROUPS[wc.group])}
 
 
 rule bigwig:
     input:
+        unpack(sf_input),
         bam="results/02_align/{sample}.dedup.bam",
         bai="results/02_align/{sample}.dedup.bam.bai",
     output:
-        "results/04_bigwig/{sample}.bw",
+        "results/04_bigwig/{sample}.{norm}.bw",
     params:
-        args=lambda wc: bigwig_args([wc.sample]),
+        args=lambda wc, input: bigwig_args([wc.sample], wc.norm, input.get("sf")),
     threads: threads_for("deeptools")
     log:
-        "<logs>/bigwig/{sample}.log",
+        "<logs>/bigwig/{sample}.{norm}.log",
     benchmark:
-        "<benchmarks>/bigwig/{sample}.tsv"
+        "<benchmarks>/bigwig/{sample}.{norm}.tsv"
     conda:
         ENV_MACS
     shell:
@@ -75,18 +103,70 @@ rule group_bigwig:
     input:
         unpack(group_bigwig_input),
     output:
-        "results/04_bigwig/groups/{group}.bw",
+        "results/04_bigwig/groups/{group}.{norm}.bw",
     params:
         cmd=group_bigwig_cmd,
     threads: threads_for("deeptools")
     log:
-        "<logs>/bigwig/groups/{group}.log",
+        "<logs>/bigwig/groups/{group}.{norm}.log",
     benchmark:
-        "<benchmarks>/bigwig/groups/{group}.tsv"
+        "<benchmarks>/bigwig/groups/{group}.{norm}.tsv"
     conda:
         ENV_MACS
     shell:
         "{params.cmd} -o {output} -p {threads} > {log} 2>&1"
+
+
+rule bin_counts:
+    """deseq2_background：各样本在全基因组 bin（bigwig.background_bin）上的 reads 数（排除 blacklist，片段延伸同 bigwig）。"""
+    input:
+        bam=expand("results/02_align/{sample}.dedup.bam", sample=PEAK_SAMPLES),
+        bai=expand("results/02_align/{sample}.dedup.bam.bai", sample=PEAK_SAMPLES),
+    output:
+        counts=temp("results/04_bigwig/bin_counts.SFbg.tsv"),
+        npz=temp("results/04_bigwig/bin_counts.SFbg.npz"),
+    params:
+        labels=PEAK_SAMPLES,
+        args=" ".join([
+            f"--binSize {config['bigwig']['background_bin']}",
+            f"--blackListFileName {REF['blacklist']}" if REF.get("blacklist") else "",
+            extend_args(PEAK_SAMPLES),
+        ]),
+    threads: threads_for("deeptools")
+    log:
+        "<logs>/bigwig/bin_counts.SFbg.log",
+    benchmark:
+        "<benchmarks>/bigwig/bin_counts.SFbg.tsv"
+    conda:
+        ENV_MACS
+    shell:
+        """
+        multiBamSummary bins -b {input.bam} --labels {params.labels} {params.args} -p {threads} \
+            -o {output.npz} --outRawCounts {output.counts} > {log} 2>&1
+        """
+
+
+def sf_counts(wc):
+    # SFpeaks：DiffBind 在 consensus peak 上的计数；SFbg：全基因组 bin 的计数
+    if wc.sf == "SFpeaks":
+        return "results/qc/replicates/peak_counts.tsv"
+    return "results/04_bigwig/bin_counts.SFbg.tsv"
+
+
+rule size_factors:
+    """DESeq2 size factor（median-of-ratios）；bigwig 除以它（--scaleFactor 1 / size factor）。"""
+    input:
+        counts=sf_counts,
+    output:
+        "results/04_bigwig/size_factors.{sf}.tsv",
+    params:
+        samples=PEAK_SAMPLES,
+    log:
+        "<logs>/bigwig/size_factors.{sf}.log",
+    conda:
+        ENV_MAIN
+    script:
+        "../scripts/size_factors.R"
 
 
 rule tss_bed:
@@ -118,14 +198,15 @@ rule tss_bed:
 
 rule tss_profile:
     input:
-        bw=expand("results/04_bigwig/{sample}.bw", sample=SAMPLES),
+        bw=sample_bw(),
         tss="results/reference/tss.bed",
     output:
         matrix="results/qc/deeptools/tss_matrix.gz",
         png="results/qc/deeptools/tss_profile.png",
         data="results/qc/deeptools/tss_profile.tsv",
     params:
-        labels=SAMPLES,
+        labels=bw_samples(BW_TAG),
+        plot=profile_plot_args(len(bw_samples(BW_TAG))),
         cmd=config["qc"]["tss_matrix"],
     threads: threads_for("deeptools")
     log:
@@ -137,5 +218,153 @@ rule tss_profile:
         {params.cmd} -S {input.bw} -R {input.tss} --samplesLabel {params.labels} \
             -p {threads} -o {output.matrix} > {log} 2>&1
         plotProfile -m {output.matrix} -o {output.png} --outFileNameData {output.data} \
-            --perGroup >> {log} 2>&1
+            {params.plot} >> {log} 2>&1
         """
+
+
+rule gene_bed:
+    """meta gene profile 用的 protein_coding 基因（TSS 到 TES，长度 ≥ qc.metagene_min_length），染色体名转换同 tss_bed。"""
+    input:
+        gtf=REF["gtf"],
+        chroms="results/reference/index_chroms.txt",
+    output:
+        "results/reference/genes.bed",
+    params:
+        rename=RENAME_CHROMS,
+        min_len=config["qc"]["metagene_min_length"],
+    log:
+        "<logs>/gene_bed.log",
+    localrule: True
+    shell:
+        """
+        if [[ {input.gtf} == *.gz ]]; then zcat {input.gtf}; else cat {input.gtf}; fi \
+        | awk -F'\\t' -v min={params.min_len} 'BEGIN {{OFS = "\\t"}}
+            $3 == "gene" && $9 ~ /gene_(bio)?type "protein_coding"/ && $5 - $4 + 1 >= min {{
+            match($9, /gene_id "[^"]+"/); id = substr($9, RSTART + 9, RLENGTH - 10);
+            print $1, $4 - 1, $5, id, ".", $7 }}' \
+        | awk -F'\\t' -v OFS='\\t' -v col=1 -f {params.rename} {input.chroms} - 2> {log} \
+        | sort -k1,1 -k2,2n -u > {output}
+        """
+
+
+def metagene_bw(wc):
+    return group_bw() if wc.set == "groups" else sample_bw()
+
+
+rule metagene_profile:
+    """meta gene profile：samples 为每个样本的 bigwig，groups 为组 bigwig。"""
+    input:
+        bw=metagene_bw,
+        genes="results/reference/genes.bed",
+    output:
+        matrix="results/qc/deeptools/metagene_{set}.matrix.gz",
+        png="results/qc/deeptools/metagene_{set}.png",
+        data="results/qc/deeptools/metagene_{set}.tsv",
+    wildcard_constraints:
+        set="samples|groups",
+    params:
+        labels=lambda wc: list(BW_GROUPS) if wc.set == "groups" else bw_samples(BW_TAG),
+        plot=lambda wc: profile_plot_args(len(BW_GROUPS) if wc.set == "groups" else len(bw_samples(BW_TAG))),
+        cmd=config["qc"]["metagene_matrix"],
+    threads: threads_for("deeptools")
+    log:
+        "<logs>/deeptools/metagene_{set}.log",
+    conda:
+        ENV_MACS
+    shell:
+        """
+        {params.cmd} -S {input.bw} -R {input.genes} --samplesLabel {params.labels} \
+            -p {threads} -o {output.matrix} > {log} 2>&1
+        plotProfile -m {output.matrix} -o {output.png} --outFileNameData {output.data} \
+            {params.plot} >> {log} 2>&1
+        """
+
+
+rule genome_bins:
+    """全基因组 bin（qc.genome_bin）上各样本 bigwig 的平均信号（multiBigwigSummary，排除 blacklist），用于全基因组的两张 profile 图。"""
+    input:
+        bw=sample_bw(),
+    output:
+        tsv="results/qc/deeptools/genome_bins.tsv",
+        npz=temp("results/qc/deeptools/genome_bins.npz"),
+    params:
+        labels=bw_samples(BW_TAG),
+        args=f"--binSize {config['qc']['genome_bin']}"
+        + (f" --blackListFileName {REF['blacklist']}" if REF.get("blacklist") else ""),
+    threads: threads_for("deeptools")
+    log:
+        "<logs>/deeptools/genome_bins.log",
+    benchmark:
+        "<benchmarks>/deeptools/genome_bins.tsv"
+    conda:
+        ENV_MACS
+    shell:
+        """
+        multiBigwigSummary bins -b {input.bw} --labels {params.labels} {params.args} -p {threads} \
+            -o {output.npz} --outRawCounts {output.tsv} > {log} 2>&1
+        """
+
+
+def mx_opt(cmd, names, default):
+    """computeMatrix 命令中某个参数的值（未写时用 deeptools 默认值）。"""
+    m = re.search(r"(?:^|\s)(?:" + "|".join(names) + r")[\s=]+(\d+)", cmd)
+    return int(m.group(1)) if m else default
+
+
+def matrix_layout(cmd):
+    """computeMatrix scale-regions 的区域划分（bp），profile_plots.R 据此画横轴。"""
+    return dict(
+        upstream=mx_opt(cmd, ["-b", "--upstream", "--beforeRegionStartLength"], 0),
+        downstream=mx_opt(cmd, ["-a", "--downstream", "--afterRegionStartLength"], 0),
+        body=mx_opt(cmd, ["-m", "--regionBodyLength"], 1000),
+        unscaled5=mx_opt(cmd, ["--unscaled5prime"], 0),
+        unscaled3=mx_opt(cmd, ["--unscaled3prime"], 0),
+        binsize=mx_opt(cmd, ["-bs", "--binSize"], 10),
+    )
+
+
+def profile_figures():
+    """报告「信号 profile」一节的图（不含扩展名）。"""
+    f = []
+    if config["qc"]["metagene_profile"]:
+        f.append("metagene_samples")
+        if BW_GROUP["enabled"] and BW_GROUPS:
+            f.append("metagene_groups")
+    if config["qc"]["genome_profile"]:
+        f += ["genome_track", "genome_distribution"]
+    return f
+
+
+def profile_plot_inputs():
+    figs, d = profile_figures(), {}
+    if "metagene_samples" in figs:
+        d["metagene_samples"] = "results/qc/deeptools/metagene_samples.tsv"
+    if "metagene_groups" in figs:
+        d["metagene_groups"] = "results/qc/deeptools/metagene_groups.tsv"
+    if "genome_track" in figs:
+        d["bins"] = "results/qc/deeptools/genome_bins.tsv"
+    return d
+
+
+if profile_figures():
+
+    rule profile_plots:
+        """信号 profile 的图（R，ggplot2）：PNG 300 dpi、PDF、SVG（嵌入 QC 报告）。"""
+        input:
+            unpack(lambda wc: profile_plot_inputs()),
+        output:
+            expand("results/qc/figures/{fig}.{ext}", fig=profile_figures(), ext=["png", "pdf", "svg"]),
+        params:
+            figures=profile_figures(),
+            outdir="results/qc/figures",
+            groups={s: SAMPLES_DF.loc[s, "group"] for s in SAMPLES},
+            controls=sorted(CONTROLS),
+            norm=BW_TAG,
+            layout=matrix_layout(config["qc"]["metagene_matrix"]),
+            track_bin=config["qc"]["genome_track_bin"],
+        log:
+            "<logs>/profile_plots.log",
+        conda:
+            ENV_MAIN
+        script:
+            "../scripts/profile_plots.R"

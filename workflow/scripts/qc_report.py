@@ -1,10 +1,11 @@
 """
 单文件 HTML QC 报告：概览、流程与参数、QC 汇总表、重复一致性（中英文可切换）。
 所有样式、脚本、流程图和图片都内嵌，不依赖网络。各列说明、参考值和检查规则来自 workflow/report/qc_metrics.yaml：
-  checks  有公开阈值的检查（warn 橙 / fail 红）
-  outlier 与本批样本比较，|值 - 中位数| > 3 x MAD（x 1.4826）标为橙色
+  checks  有固定阈值的检查（warn 橙 / fail 红）
+  outlier 没有固定阈值的指标与本批样本比较，|值 - 中位数| > 3 x MAD（x 1.4826）标为橙色
 重复一致性的数据与图来自 results/qc/replicates/（replicate_qc.py 计算，replicate_plots.R 绘图）。
 """
+import base64
 import html
 import json
 import re
@@ -169,17 +170,6 @@ if REP:
                 flag(row_of[r["sample"]], "sex", "warn",
                      f"推断为 {r.sex}（chrY 占比 {r.y_frac:.4g}%），与同组其他样本不同（{counts}）",
                      f"inferred {r.sex} (chrY fraction {r.y_frac:.4g}%), unlike the rest of the group ({counts.replace('、', ', ')})")
-        # chrX 占比随细胞类型变化，只在组内比较：雄性只有一条 X，占比应低于同组雌性
-        for g, sub in rs[rs["x_frac"].notna()].groupby("group"):
-            if len(sub) < 3:
-                continue
-            m = sub["x_frac"].median()
-            mad = 1.4826 * (sub["x_frac"] - m).abs().median()
-            for _, r in sub.iterrows():
-                if mad > 0 and m - r.x_frac > 3 * mad:
-                    flag(row_of[r["sample"]], "x_frac", "warn",
-                         f"chrX 占比 {r.x_frac:.2f}% 明显低于同组中位数 {m:.2f}%（差 > 3 × MAD），可能是雄性或混入了雄性样本",
-                         f"chrX fraction {r.x_frac:.2f}% well below the group median {m:.2f}% (> 3 × MAD); possibly male or mixed with a male sample")
 
 flagged = sorted({i for i, _ in flags})
 
@@ -260,13 +250,16 @@ lo80 = df.loc[col("mapping_rate") < 80, "sample"].tolist()
 lo95 = df.loc[col("mapping_rate") < 95, "sample"].tolist()
 mt_m, mt_r = rng(col("mito_rate"))
 dp_m, dp_r = rng(col("duplicates_rate"))
+dup_hi = df.loc[col("duplicates_rate") > 50, "sample"].tolist()
 points.append((
     f"比对与过滤：mapping rate 中位数 {m_m}%（{m_r}%），"
     + ("均高于 ENCODE 理想值 95%" if not lo95 else f"{len(lo95)} 个样本低于理想值 95%" + (f"，其中 {len(lo80)} 个低于可接受标准 80%（{names(lo80)}）" if lo80 else "，但都高于可接受标准 80%"))
-    + f"。线粒体比例中位数 {mt_m}%（{mt_r}%），重复率中位数 {dp_m}%（{dp_r}%）；这两项没有统一阈值，主要看同批是否有离群样本。",
+    + f"。线粒体比例中位数 {mt_m}%（{mt_r}%），没有统一阈值，主要看同批是否有离群样本；重复率中位数 {dp_m}%（{dp_r}%），"
+    + (f"{len(dup_hi)} 个样本超过 50%（{names(dup_hi)}）。" if dup_hi else "均不超过 50%。"),
     f"Alignment and filtering: median mapping rate {m_m}% ({m_r}%), "
     + ("all above the ENCODE expected level of 95%" if not lo95 else f"{len(lo95)} below the expected 95%" + (f", {len(lo80)} below the acceptable 80% ({names(lo80)})" if lo80 else ", all above the acceptable 80%"))
-    + f". Median mitochondrial fraction {mt_m}% ({mt_r}%) and duplicate rate {dp_m}% ({dp_r}%); neither has a fixed threshold, so look for outliers within the batch.",
+    + f". Median mitochondrial fraction {mt_m}% ({mt_r}%), which has no fixed threshold, so look for outliers within the batch; median duplicate rate {dp_m}% ({dp_r}%), "
+    + (f"{len(dup_hi)} samples above 50% ({names(dup_hi)})." if dup_hi else "none above 50%."),
 ))
 
 f_m, f_r = rng(col("frip"), 1, 3)
@@ -326,7 +319,15 @@ sources = " · ".join(
 # ------------------------------------------------------------
 # 流程与参数
 # ------------------------------------------------------------
-svg = re.sub(r"^<\?xml[^>]*>\s*", "", Path(snakemake.input.flowchart).read_text())
+def flow_svg(path, prefix):
+    """内嵌流程图 SVG；中英文两份同时嵌入，按语言显示其一（id 加前缀，避免冲突）。"""
+    t = re.sub(r"^<\?xml[^>]*>\s*", "", Path(path).read_text())
+    t = re.sub(r'\bid="([^"]+)"', rf'id="{prefix}-\1"', t)
+    return re.sub(r"url\(#([^)]+)\)", rf"url(#{prefix}-\1)", t)
+
+
+svg = (f'<div data-l="zh">{flow_svg(snakemake.input.flowchart, "flow-zh")}</div>'
+       f'<div data-l="en">{flow_svg(snakemake.input.flowchart_en, "flow-en")}</div>')
 settings_html = "".join(f"<tr><th>{L(kz, ke)}</th><td>{L(vz, ve)}</td></tr>" for kz, ke, vz, ve in p.settings)
 
 
@@ -377,6 +378,14 @@ def inline_svg(path, prefix):
     return re.sub(r'(<svg[^>]*?) width="[^"]*" height="[^"]*"', r"\1", t, count=1)
 
 
+def fig_img(fig, path, k):
+    """散点矩阵的点为位图，内嵌 PNG（位图在 cairo SVG 中的显示因浏览器而异）；其它图内嵌 SVG。"""
+    if fig == "correlation_scatter":
+        png = base64.b64encode(Path(path).with_suffix(".png").read_bytes()).decode()
+        return f'<img src="data:image/png;base64,{png}" alt="">'
+    return inline_svg(path, f"f{k}")
+
+
 def rep_fmt(key, v):
     if pd.isna(v):
         return ""
@@ -419,6 +428,31 @@ def rep_table(frame, keys, show=None):
     return f'<div class="scroll"><table class="qc"><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
+# ------------------------------------------------------------
+# 片段长度分布（PE 样本；图 1，放在 QC 汇总表之后）
+# ------------------------------------------------------------
+frag_html = ""
+N_FRAG = int("frag_svg" in inp.keys())
+if N_FRAG:
+    links = " · ".join(f'<a href="figures/fragment_length.{x}" target="_blank">{x.upper()}</a>' for x in ("pdf", "png", "svg"))
+    frag_html = (
+        f'<figure class="card apa" id="fig-fragment_length"><div class="fig-label">{L("图 1", "Figure 1")}</div>'
+        f'<div class="fig-title">{L("片段长度分布", "Fragment length distribution")}</div>'
+        f'<div class="fig-img">{inline_svg(inp.frag_svg, "frag")}</div>'
+        f'<figcaption><i>{L("注：", "Note.")}</i> ' + L(
+            "每组一个分面，组内每个重复一条线（颜色见图例），为该 PE 样本去重后 BAM 中各长度片段的占比（samtools stats，只含最主要的 99% 片段）；"
+            "SE 样本没有片段长度，不画。灰色区域（< 120 bp）为 nucleosome-free（亚核小体）片段，其占比即汇总表的 subnucleosomal_rate。"
+            "好的 ATAC 文库以 nucleosome-free 片段为主，并在约 200 bp、400 bp 处可见单、二核小体的峰，短片段区可见约 10 bp 的锯齿"
+            "（DNA 螺旋周期）；核小体周期不明显、nucleosome-free 片段少，提示 Tn5 过量、细胞核状态差或死细胞多。",
+            "One panel per group, one line per replicate (colours in the legend): the share of fragments of each length in the "
+            "deduplicated BAM of a PE sample (samtools stats, main 99% of fragments only); SE samples have no fragment lengths and are "
+            "not shown. The grey area (< 120 bp) holds nucleosome-free (sub-nucleosomal) fragments, whose share is subnucleosomal_rate in "
+            "the summary table. Good ATAC libraries are dominated by nucleosome-free fragments, with mono- and di-nucleosome peaks near "
+            "200 and 400 bp and a ~10 bp sawtooth (DNA helical period) among short fragments; a weak nucleosome ladder and few "
+            "nucleosome-free fragments point to excess Tn5, poor nuclei or many dead cells.")
+        + f'</figcaption><div class="muted dl">{links} · <a href="fragment_length.tsv" target="_blank">fragment_length.tsv</a></div></figure>'
+    )
+
 rep_html = ""
 if REP:
     method = "Spearman" if rinfo["method"] == "spearman" else "Pearson"
@@ -432,13 +466,18 @@ if REP:
     mm10 = rinfo.get("genome") == "mm10"
     big_groups = [g for g in rinfo["rep_groups"] if len(rinfo["groups"][g]) > 4]
     FIGS = {
-        "correlation": (
+        "correlation_scatter": (
             ("样本间相关性", "Sample-to-sample correlation of chromatin accessibility"),
-            (f"{method} 相关系数，基于 {n_cons} 个 consensus peak 的 log2(CPM + 1)，按 1 − r 层次聚类（average linkage），"
-             f"上方色条为分组。{cons_zh}色标为 viridis 顺序色板，范围为最小 r 到 1：样本间相关系数均为正，以 0 为中心的发散色板会浪费一半色阶、难以分辨高相关区间的差异。",
-             f"{method} correlation of log2(CPM + 1) over {n_cons} consensus peaks, clustered by 1 − r (average linkage); the bar on top "
-             f"shows the groups. {cons_en} A sequential viridis scale runs from the lowest r to 1: correlations between samples are all positive, so a "
-             "diverging scale centred on 0 would waste half of its range and hide differences among high correlations."),
+            ("左：按 1 − r 层次聚类（average linkage）的聚类树，色条为分组；样本按聚类顺序排列。"
+             "下三角：每个点为一个 consensus peak，坐标为两个样本计数的 log2(CPM + 1)"
+             + (f"；共 {n_cons} 个 peak，随机抽取 {rinfo['scatter_peaks']:,} 个作图" if rinfo["scatter_peaks"] < rinfo["consensus_peaks"] else "")
+             + f"，虚线为 y = x。上三角：{method} 相关系数（基于全部 consensus peak），底色按数值着色（蓝色顺序色阶，范围为最小 r 到 1）。"
+             f"对角：样本名。{cons_zh}",
+             "Left: dendrogram of hierarchical clustering on 1 − r (average linkage), with the group bar; samples are in clustering order. "
+             "Lower triangle: each point is one consensus peak, plotted as log2(CPM + 1) of the counts of two samples"
+             + (f"; {rinfo['scatter_peaks']:,} of the {n_cons} peaks are drawn at random" if rinfo["scatter_peaks"] < rinfo["consensus_peaks"] else "")
+             + f"; the dashed line is y = x. Upper triangle: {method} correlation over all consensus peaks, shaded by value "
+             f"(sequential blue scale from the lowest r to 1). Diagonal: sample names. {cons_en}"),
         ),
         "pca": (
             ("主成分分析", "Principal component analysis of chromatin accessibility"),
@@ -466,30 +505,45 @@ if REP:
              "(shared bases / union)."
              + (f" Groups with more than 4 replicates ({names(big_groups)}) are not drawn; see the Jaccard figure." if big_groups else "")),
         ),
+        "group_venn": (
+            ("组间 peak 覆盖碱基的 Venn 图", "Venn diagrams of bases covered by the peaks of different groups"),
+            (f"每张小图比较几个组。每个区域的数字为只被这几个组的 reproducible peak 覆盖的碱基数（Mb，bedtools multiinter），颜色按同一数值着色；"
+             f"reproducible peak 为组内至少 {rinfo['min_reps']} 个重复中出现的区域（DiffBind 组内 consensus），只有 1 个样本的组用该样本的 peak。"
+             "一个圆（椭圆）内各区域之和即该组 reproducible peak 覆盖的总碱基数。区域面积不按比例。"
+             "peak 集合的差别也受测序深度和重复数影响，定量比较请用差异分析（diffbind.rds）。"
+             "比较哪些组由配置 replicates.group_venn 指定（为空时共 2–4 个组则全部比较）。",
+             "Each panel compares a few groups. Each number is the number of bases (Mb, bedtools multiinter) covered by the reproducible "
+             f"peaks of exactly those groups, and the colour encodes the same value; reproducible peaks are regions found in at least "
+             f"{rinfo['min_reps']} replicates of a group (DiffBind within-group consensus), and a single-sample group uses that sample's peaks. "
+             "The regions inside a circle (ellipse) add up to the bases covered by that group. Areas are not to scale. Differences "
+             "between peak sets also reflect depth and replicate numbers; use differential analysis (diffbind.rds) for quantitative "
+             "comparisons. The groups compared are set by replicates.group_venn in the config (when empty, all groups are compared "
+             "if there are 2–4)."),
+        ),
         "sex": (
             ("根据 chrX、chrY reads 占比推断性别", "Sex inferred from the fraction of reads on chrX and chrY"),
             (f"两轴均为占全部比对 reads（过滤 MAPQ ≥ {rinfo['mapq']} 并去重后）的百分比。纵轴只统计 chrY 计数区 {rinfo['y_region']}"
              "（对数轴，0 显示为 0.00001%）：即 chrY 去掉 PAR（拟常染色体区，X、Y 上序列相同，雌性 reads 也会比对上）后的部分"
              + ("，并在 PAR 起点前多去掉约 745 kb，因为雌性样本在那里也有大量 reads" if mm10 else "") + "。该区域仍含与 chrX 同源的扩增序列，"
              f"雌性样本也有少量 reads，因此按阈值判定：虚线为阈值（< {lo}% 雌性，> {hi}% 雄性，之间无法判断）。"
-             "横轴 chrX 占比随细胞类型变化，且 ATAC 中失活 X 本身可及性低，不用于判定，只在组内比较。只标注未判为雌性的样本。",
+             "横轴 chrX 占比随细胞类型变化，且 ATAC 中失活 X 本身可及性低，不用于判定，仅供参考。只标注未判为雌性的样本。",
              f"Both axes give the percentage of all mapped reads (MAPQ ≥ {rinfo['mapq']}, deduplicated). The y axis counts only the chrY "
              f"region {rinfo['y_region']} (log scale; 0 shown as 0.00001%): chrY without the pseudoautosomal region (PAR, identical on X "
              "and Y, so female reads also map there)"
              + ("; a further ~745 kb before the PAR is excluded because female samples also have many reads there" if mm10 else "")
              + ". The region still contains X-homologous ampliconic sequence, so female samples carry a few reads "
              f"and the call uses thresholds (dashed lines: < {lo}% female, > {hi}% male, undetermined in between). The chrX fraction on "
-             "the x axis varies with cell type and the inactive X is poorly accessible in ATAC, so it is only compared within groups and "
+             "the x axis varies with cell type and the inactive X is poorly accessible in ATAC, so it is shown for reference only and "
              "not used for the call. Only samples not called female are labelled."),
         ),
     }
     figs_html = []
-    for k, (fig, path) in enumerate(zip(p.rep_figures, inp.rep_svg), 1):
+    for k, (fig, path) in enumerate(zip(p.rep_figures, inp.rep_svg), 1 + N_FRAG):
         (tz, te), (nz, ne) = FIGS[fig]
         links = " · ".join(f'<a href="replicates/figures/{fig}.{x}" target="_blank">{x.upper()}</a>' for x in ("pdf", "png", "svg"))
         figs_html.append(
             f'<figure class="card apa" id="fig-{fig}"><div class="fig-label">{L(f"图 {k}", f"Figure {k}")}</div>'
-            f'<div class="fig-title">{L(tz, te)}</div><div class="fig-img">{inline_svg(path, f"f{k}")}</div>'
+            f'<div class="fig-title">{L(tz, te)}</div><div class="fig-img">{fig_img(fig, path, k)}</div>'
             f'<figcaption><i>{L("注：", "Note.")}</i> {L(nz, ne)}</figcaption><div class="muted dl">{links}</div></figure>'
         )
 
@@ -534,15 +588,14 @@ if REP:
     if "sex" in rs:
         vc = rs["sex"].value_counts()
         cnt_z = "、".join(f"{k} {v}" for k, v in vc.items())
-        sex_flag = sorted({rs.loc[j, "sample"] for j in rs.index
-                           if any((row_of[rs.loc[j, "sample"]], k) in flags for k in ("sex", "x_frac"))})
+        sex_flag = sorted({rs.loc[j, "sample"] for j in rs.index if (row_of[rs.loc[j, "sample"]], "sex") in flags})
         rp.append((
             f"性别（按 chrY 计数区 {rinfo['y_region']} 的 reads 占比判定）：{cnt_z}。"
-            + (f"需复核：{names(sex_flag)}（无法判断、与同组其他样本不同或 chrX 占比偏低；也可能是混入了另一性别的样本）。" if sex_flag else "各组内一致。"),
+            + (f"需复核：{names(sex_flag)}（无法判断或与同组其他样本不同；也可能是混入了另一性别的样本）。" if sex_flag else "各组内一致。"),
             f"Sex (called from the fraction of reads in the chrY region {rinfo['y_region']}): {cnt_z.replace('、', ', ')}. "
-            + (f"Review: {names(sex_flag)} (undetermined, unlike the rest of the group or low chrX fraction; may also indicate a mixed sample)." if sex_flag else "Consistent within every group."),
+            + (f"Review: {names(sex_flag)} (undetermined or unlike the rest of the group; may also indicate a mixed sample)." if sex_flag else "Consistent within every group."),
         ))
-    rep_keys = ("within_cor", "mean_jaccard", "sex", "x_frac")
+    rep_keys = ("within_cor", "mean_jaccard", "sex")
     rep_flagged = sorted({df.loc[i, "sample"] for (i, c) in flags if c in rep_keys})
     rp.append((
         "总体：" + (f"建议复核 {names(rep_flagged)}（原因见上表标色单元格）。" if rep_flagged else "各组重复一致性良好。"),
@@ -550,7 +603,8 @@ if REP:
     ))
     rep_points = "".join(f"<li>{L(zh, en)}</li>" for zh, en in rp)
     tsvs = " · ".join(f'<a href="replicates/{f}" target="_blank">{f}</a>'
-                      for f in ("samples.tsv", "groups.tsv", "peak_overlap.tsv", "peak_venn.tsv", "correlation.tsv", "pca.tsv", "peak_counts.tsv"))
+                      for f in ("samples.tsv", "groups.tsv", "peak_overlap.tsv", "peak_venn.tsv", "group_venn.tsv", "correlation.tsv",
+                                "log2cpm.tsv", "pca.tsv", "peak_counts.tsv"))
     rep_html = f"""
 <section id="replicates">
   <h2>{L("重复一致性", "Replicate consistency")}</h2>
@@ -569,6 +623,115 @@ if REP:
     <p class="muted">{L("数据", "Data")}：{tsvs}</p>
   </div>
   {"".join(figs_html)}
+</section>
+"""
+
+
+# ------------------------------------------------------------
+# 信号 profile（profile_plots.R 绘制，数据来自 deeptools）
+# ------------------------------------------------------------
+def mx_opt(cmd, names, default):
+    """computeMatrix 命令中某个参数的值（未写时用 deeptools 默认值）。"""
+    m = re.search(r"(?:^|\s)(?:" + "|".join(names) + r")[\s=]+(\d+)", cmd)
+    return int(m.group(1)) if m else default
+
+
+def n_lines(path):
+    with open(path) as f:
+        return sum(1 for _ in f)
+
+
+def kb(x):
+    return f"{x / 1e6:g} Mb" if x >= 1e6 else f"{x / 1e3:g} kb"
+
+
+prof = p.profile
+prof_figs = []  # (图名, 标题, 图注, 数据文件)
+rep_zh, rep_en = "每组一格，组内每个重复一条线（颜色见图例）", "one panel per group, one line per replicate (colours in the legend)"
+if "metagene_samples" in prof["figures"]:
+    mg = prof["metagene"]
+    b, a = mx_opt(mg, ["-b", "--upstream", "--beforeRegionStartLength"], 0), mx_opt(mg, ["-a", "--downstream", "--afterRegionStartLength"], 0)
+    body = mx_opt(mg, ["-m", "--regionBodyLength"], 1000)
+    u5, u3 = mx_opt(mg, ["--unscaled5prime"], 0), mx_opt(mg, ["--unscaled3prime"], 0)
+    n_genes = n_lines(inp.prof_genes)
+    unscaled_zh = (f"TSS 下游 {u5:,} bp" if u5 else "") + ("、" if u5 and u3 else "") + (f"TES 上游 {u3:,} bp" if u3 else "")
+    unscaled_en = (f"the first {u5:,} bp after the TSS" if u5 else "") + (" and " if u5 and u3 else "") + (f"the last {u3:,} bp before the TES" if u3 else "")
+    scale_zh = (f"TSS 上游 {b:,} bp、TES 下游 {a:,} bp" + (f"以及{unscaled_zh}" if unscaled_zh else "") + "按真实距离；"
+                f"其余基因体统一缩放到 {body:,} bp，这一段横轴是基因内的相对位置，不是真实距离。")
+    scale_en = (f"{b:,} bp upstream of the TSS and {a:,} bp downstream of the TES" + (f", as well as {unscaled_en}," if unscaled_en else "")
+                + f" are drawn to true distance; the rest of each gene body is scaled to {body:,} bp, so that part of the x axis is the "
+                "relative position within the gene, not distance.")
+    genes_zh = f"{n_genes:,} 个 protein_coding 基因（TSS 到 TES，长度 ≥ {prof['min_len']:,} bp）"
+    genes_en = f"{n_genes:,} protein_coding genes (TSS to TES, ≥ {prof['min_len']:,} bp)"
+    prof_figs.append((
+        "metagene_samples",
+        ("Meta gene profile：每个样本", "Meta gene profile: per sample"),
+        (f"{rep_zh}；纵轴为该样本在 {genes_zh}上的平均信号（bigwig，{prof['norm']} 归一化）。{scale_zh}"
+         "基因按 GTF 的链方向排列，左为 5′ 端。开放染色质集中在 TSS（启动子），TES 处常有一个小峰，基因体内信号低；"
+         "TSS 峰低、整体平坦提示信噪比差（与 TSS enrichment 一致）。同组重复的曲线应基本重合。",
+         f"{rep_en[0].upper() + rep_en[1:]}; the y axis is the mean signal of the sample over {genes_en} (bigwig, {prof['norm']} normalized). "
+         f"{scale_en} Genes are oriented by their GTF strand, 5′ end on the left. Open chromatin concentrates at the TSS (promoters), often "
+         "with a small peak at the TES and low signal across the gene body; a low TSS peak and a flat profile point to poor signal-to-noise "
+         "(consistent with TSS enrichment). Replicates of a group should largely overlap."),
+        "deeptools/metagene_samples.tsv",
+    ))
+if "metagene_groups" in prof["figures"]:
+    gz, ge = (("合并组内重复的 BAM 后生成", "replicate BAMs merged") if prof["group_method"] == "merge"
+              else ("各重复的 bigwig 逐 bin 取平均", "replicate bigwigs averaged per bin"))
+    prof_figs.append((
+        "metagene_groups",
+        ("Meta gene profile：每组", "Meta gene profile: per group"),
+        (f"同上图，每条线为一组的组 bigwig（{gz}；有 ≥ 2 个参与合并的重复的组）；每格最多 3 组，组多时按顺序分成几格，颜色见图例。",
+         f"As above, each line is the bigwig of one group ({ge}; groups with ≥ 2 merged replicates); at most 3 groups "
+         "per panel, split in order when there are more, colours in the legend."),
+        "deeptools/metagene_groups.tsv",
+    ))
+if "genome_track" in prof["figures"]:
+    gb, tb = prof["genome_bin"], prof["track_bin"]
+    prof_figs.append((
+        "genome_track",
+        ("全基因组 bin 信号：沿染色体", "Genome-wide binned signal along the chromosomes"),
+        (f"{rep_zh}。基因组按 {kb(gb)} 分 bin 计算 bigwig 平均信号（multiBigwigSummary，{prof['norm']} 归一化，排除 blacklist），"
+         f"再合并为 {kb(tb)} 的 bin；纵轴为 log2(bin 信号 / 该样本全部 bin 的中位数)，超出 ±3 的截在 ±3，信号为 0 的 bin（如组装缺口）不画，灰白相间的底色区分染色体。"
+         "只画主要染色体。大段区域整体偏高或偏低提示拷贝数变化或样本异常；雌性样本的 chrY 很低或没有信号；"
+         "某个重复与同组其他重复走势不同时需复核。",
+         f"{rep_en[0].upper() + rep_en[1:]}. The mean bigwig signal is computed in {kb(gb)} bins (multiBigwigSummary, {prof['norm']} "
+         f"normalized, blacklist excluded) and merged into {kb(tb)} bins; the y axis is log2(bin signal / median of all bins of the sample), "
+         "clipped at ±3; bins without signal (e.g. assembly gaps) are not drawn, and alternating shading marks the chromosomes. Main chromosomes only. Long stretches shifted up or down point "
+         "to copy-number changes or sample problems; chrY of female samples is very low or absent; review a replicate "
+         "whose course differs from the rest of its group."),
+        "deeptools/genome_bins.tsv",
+    ))
+    prof_figs.append((
+        "genome_distribution",
+        ("全基因组 bin 信号：累积分布", "Genome-wide binned signal: cumulative distribution"),
+        (f"{rep_zh}。{kb(gb)} bin（同上图）按信号从低到高排列，横轴为 bin 的累计比例，纵轴为这些 bin 的信号占全部信号的比例"
+         "（同 deeptools fingerprint 的思路）；虚线为信号完全均匀时的情形。曲线越向右下弯，信号越集中在少数区域："
+         "信噪比好的 ATAC 样本信号集中在开放区域，曲线在右端急剧上升；接近虚线提示背景高（如死细胞、Tn5 过量）。同组重复应基本重合。",
+         f"{rep_en[0].upper() + rep_en[1:]}. The {kb(gb)} bins (as above) are ranked by signal from low to high; the x axis is the cumulative "
+         "share of bins and the y axis the share of all signal they hold (the idea of the deeptools fingerprint); the dashed line is a "
+         "perfectly uniform signal. The more a curve bends to the lower right, the more the signal is concentrated in few regions: "
+         "ATAC samples with good signal-to-noise concentrate their signal in open regions and rise steeply at the right end, while a "
+         "curve close to the diagonal points to high background (e.g. dead cells, excess Tn5). Replicates of a group should largely overlap."),
+        "deeptools/genome_bins.tsv",
+    ))
+
+prof_html = ""
+if prof_figs:
+    k0 = N_FRAG + (len(p.rep_figures) if REP else 0)
+    items = []
+    for k, (name, (tz, te), (nz, ne), data) in enumerate(prof_figs, k0 + 1):
+        links = " · ".join(f'<a href="figures/{name}.{x}" target="_blank">{x.upper()}</a>' for x in ("pdf", "png", "svg"))
+        links += f' · <a href="{data}" target="_blank">{Path(data).name}</a>'
+        items.append(
+            f'<figure class="card apa" id="fig-{name}"><div class="fig-label">{L(f"图 {k}", f"Figure {k}")}</div>'
+            f'<div class="fig-title">{L(tz, te)}</div><div class="fig-img">{inline_svg(inp["prof_" + name], f"p{k}")}</div>'
+            f'<figcaption><i>{L("注：", "Note.")}</i> {L(nz, ne)}</figcaption><div class="muted dl">{links}</div></figure>'
+        )
+    prof_html = f"""
+<section id="profiles">
+  <h2>{L("信号 profile", "Signal profiles")}</h2>
+  {"".join(items)}
 </section>
 """
 
@@ -619,6 +782,7 @@ nav a.item.active { background: var(--accent); color: #fff; }
 nav .ext { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 nav .ext a { display: block; padding: 6px 12px; font-size: 13px; }
 main { margin-left: 232px; padding: 40px 48px 80px; max-width: 1480px; }
+header.top .pipe { display: inline-block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
 header.top h1 { font-size: 32px; font-weight: 700; letter-spacing: -.02em; margin: 0; }
 header.top .project { margin-top: 8px; font-size: 15px; font-weight: 600; }
 header.top .project .path { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; overflow-wrap: anywhere; }
@@ -786,19 +950,21 @@ page = f"""<!doctype html>
 <body>
 <nav>
   <div class="brand">{L(title_zh, title_en)}</div>
-  <div class="brand-sub">{esc(p.pipeline)}</div>
+  <div class="brand-sub"><a href="{esc(p.github)}" target="_blank" rel="noopener">{esc(p.pipeline)}</a></div>
   <div class="seg"><button data-lang="zh">中文</button><button data-lang="en">EN</button></div>
   <a class="item" href="#overview">{L("概览", "Overview")}</a>
   <a class="item" href="#workflow">{L("流程与参数", "Workflow & parameters")}</a>
   <a class="item" href="#summary">{L("QC 汇总表", "QC summary")}</a>
   {f'<a class="item" href="#replicates">{L("重复一致性", "Replicate consistency")}</a>' if REP else ""}
+  {f'<a class="item" href="#profiles">{L("信号 profile", "Signal profiles")}</a>' if prof_html else ""}
   <div class="ext"><a href="{esc(p.multiqc)}" target="_blank">{L("MultiQC 报告", "MultiQC report")} ↗</a></div>
 </nav>
 <main>
 <header class="top">
+  <a class="pipe" href="{esc(p.github)}" target="_blank" rel="noopener" title="GitHub">{esc(p.pipeline)} ↗</a>
   <h1>{L(title_zh, title_en)}</h1>
   <div class="project">{esc(PROJECT)}<span class="path">{esc(str(OUTDIR))}</span></div>
-  <div class="meta">{esc(p.pipeline)} {esc(p.version)} · {L("生成于", "generated")} {datetime.now():%Y-%m-%d %H:%M} · {L(f"{n} 个样本", f"{n} samples")}</div>
+  <div class="meta">{L("流程版本", "Pipeline version")} {esc(p.version)} · {L("生成于", "generated")} {datetime.now():%Y-%m-%d %H:%M} · {L(f"{n} 个样本", f"{n} samples")}</div>
 </header>
 
 <section id="overview">
@@ -840,8 +1006,10 @@ page = f"""<!doctype html>
     <ul class="points">{conclusion}</ul>
     <p class="muted">{L("参考来源", "References")}：{sources}</p>
   </div>
+  {frag_html}
 </section>
 {rep_html}
+{prof_html}
 </main>
 <script>{JS}</script>
 </body>

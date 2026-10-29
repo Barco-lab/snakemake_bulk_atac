@@ -9,6 +9,14 @@ def qc_files():
     return d
 
 
+def profile_files():
+    """QC 报告「信号 profile」一节：profile_plots 的 SVG；meta gene 另需基因数（bed）。"""
+    d = {f"prof_{f}": f"results/qc/figures/{f}.svg" for f in profile_figures()}
+    if config["qc"]["metagene_profile"]:
+        d["prof_genes"] = "results/reference/genes.bed"
+    return d
+
+
 def trim_report(s, r):
     return f"results/01_trim/reports/{s}_{r}.fastq.gz_trimming_report.txt"
 
@@ -23,6 +31,7 @@ rule summary:
         filtered=expand("results/02_align/stats/{sample}.filtered.flagstat", sample=SAMPLES),
         final=expand("results/02_align/stats/{sample}.dedup.flagstat", sample=SAMPLES),
         frip=expand("results/qc/frip/{sample}.tsv", sample=SAMPLES),
+        size_factors=expand("results/04_bigwig/size_factors.{tag}.tsv", tag=[t for t in BW_TAGS if BW_NORM_OF[t] in BW_SF]),
         peaks=[peak_file(s) for s in SAMPLES],
         contam=(
             expand("results/qc/contamination/{sample}.log", sample=SAMPLES)
@@ -30,7 +39,8 @@ rule summary:
             else []
         ),
     output:
-        "results/qc/summary.tsv",
+        summary="results/qc/summary.tsv",
+        fragments="results/qc/fragment_length.tsv",
     params:
         samples=SAMPLES,
         meta={
@@ -43,6 +53,7 @@ rule summary:
         mapq=config["filter"]["mapq"],
         mito=MITO,
         tss_matrix=config["qc"]["tss_matrix"],
+        sf_tags=[t for t in BW_TAGS if BW_NORM_OF[t] in BW_SF],
     log:
         "<logs>/summary.log",
     script:
@@ -92,6 +103,32 @@ rule multiqc:
 
 
 
+FRAG_FIG = "results/qc/figures/fragment_length"
+
+
+def fragment_report_inputs():
+    """QC 报告中的片段长度分布图（只有 SE 样本时不画）。"""
+    return {"frag_svg": f"{FRAG_FIG}.svg"} if PE_SAMPLES else {}
+
+
+rule fragment_plot:
+    """PE 样本去重后的片段长度分布（R，ggplot2）：PNG 300 dpi、PDF、SVG（嵌入 QC 报告）。"""
+    input:
+        "results/qc/fragment_length.tsv",
+    output:
+        multiext(FRAG_FIG, ".png", ".pdf", ".svg"),
+    params:
+        groups={s: SAMPLES_DF.loc[s, "group"] for s in SAMPLES},
+        controls=sorted(CONTROLS),
+        max_length=600,
+    log:
+        "<logs>/fragment_plot.log",
+    conda:
+        ENV_MAIN
+    script:
+        "../scripts/fragment_plot.R"
+
+
 def group_bigwig_desc():
     """QC 报告中组 bigwig 的说明：(中文, 英文)。"""
     if not BW_GROUP["enabled"]:
@@ -107,6 +144,31 @@ def group_bigwig_desc():
         zh += "；不参与合并：" + "、".join(excluded)
         en += "; excluded: " + ", ".join(excluded)
     return zh, en
+
+
+def bigwig_desc():
+    """设置表的 bigwig 一行：每种归一化一句，注明 QC 图用哪一种。"""
+    b = config["bigwig"]
+    zh, en = [], []
+    for tag, norm in BW_NORM_OF.items():
+        if norm == "deseq2_peaks":
+            z, e = "DESeq2 size factor（consensus peak 计数）", "DESeq2 size factor (consensus peak counts)"
+        elif norm == "deseq2_background":
+            z = f"DESeq2 size factor（全基因组 {b['background_bin']} bp bin 计数）"
+            e = f"DESeq2 size factor (genome-wide {b['background_bin']} bp bin counts)"
+        else:
+            z = e = f"`--normalizeUsing {norm}`"
+        zh.append(f"`{tag}.bw`：{z}")
+        en.append(f"`{tag}.bw`: {e}")
+    sf = any(n in BW_SF for n in BW_NORMS)
+    return (
+        f"`--binSize {b['binsize']}`，排除 blacklist；" + "；".join(zh)
+        + ("（size factor 为 median-of-ratios，`--scaleFactor 1 / size factor`）" if sf else "")
+        + f"；QC 图用 `{BW_TAG}`",
+        f"`--binSize {b['binsize']}`, blacklist excluded; " + "; ".join(en)
+        + (" (median-of-ratios size factors, `--scaleFactor 1 / size factor`)" if sf else "")
+        + f"; QC figures use `{BW_TAG}`",
+    )
 
 
 def report_settings():
@@ -135,12 +197,17 @@ def report_settings():
         macs.append(("SE：`-f BAM " + m["se"] + "`", "SE: `-f BAM " + m["se"] + "`"))
     rows.append(("MACS3", "MACS3", f"q < {m['qvalue']}；" + "；".join(z for z, _ in macs),
                  f"q < {m['qvalue']}; " + "; ".join(e for _, e in macs)))
-    bw = f"`--binSize {b['binsize']} --normalizeUsing {b['normalize']}`"
     rows += [
-        ("bigwig", "bigwig", bw + "，排除 blacklist", bw + ", blacklist excluded"),
+        ("bigwig", "bigwig", *bigwig_desc()),
         ("组 bigwig", "Group bigwig", *group_bigwig_desc()),
         ("TSS profile", "TSS profile", f"`{c['qc']['tss_matrix']}`" if c["qc"]["tss_profile"] else "不计算",
          f"`{c['qc']['tss_matrix']}`" if c["qc"]["tss_profile"] else "disabled"),
+        ("Meta gene profile", "Meta gene profile",
+         f"`{c['qc']['metagene_matrix']}`；protein_coding 基因，长度 ≥ {c['qc']['metagene_min_length']} bp" if c["qc"]["metagene_profile"] else "不计算",
+         f"`{c['qc']['metagene_matrix']}`; protein_coding genes ≥ {c['qc']['metagene_min_length']} bp" if c["qc"]["metagene_profile"] else "disabled"),
+        ("全基因组 bin", "Genome-wide bins",
+         f"`multiBigwigSummary bins --binSize {c['qc']['genome_bin']}`，排除 blacklist；沿染色体的图合并为 {c['qc']['genome_track_bin']:,} bp" if c["qc"]["genome_profile"] else "不计算",
+         f"`multiBigwigSummary bins --binSize {c['qc']['genome_bin']}`, blacklist excluded; merged into {c['qc']['genome_track_bin']:,} bp along the chromosomes" if c["qc"]["genome_profile"] else "disabled"),
         ("污染检查", "Contamination", f"比对到 {CONTAM['genome']}" if CONTAM["enabled"] else "不检查",
          f"aligned to {CONTAM['genome']}" if CONTAM["enabled"] else "disabled"),
         ("motif", "motif", "HOMER" if c["motif"]["enabled"] else "不分析", "HOMER" if c["motif"]["enabled"] else "disabled"),
@@ -155,10 +222,10 @@ def report_settings():
         rows.append((
             "重复一致性", "Replicates",
             f"{len(GROUPS)} 组（{len(REP_GROUPS)} 组有 ≥ 2 个重复）；reproducible peak 至少出现在 {r['min_reps']} 个重复中；"
-            f"consensus peak 由 DiffBind 得到（组内 consensus 取并集，" + (f"峰顶 ± {r['summits']} bp" if r["summits"] else "原宽度") + "）；"
+            f"consensus peak 由 DiffBind 得到（组内 consensus 取并集，" + (f"峰顶 ± {diffbind_summits()} bp" if diffbind_summits() else "原宽度") + "）；"
             f"计数的 log2(CPM + 1)，{r['method']} 相关，PCA 取方差最大的 {r['pca_top']} 个 peak" + sex_zh,
             f"{len(GROUPS)} groups ({len(REP_GROUPS)} with ≥ 2 replicates); reproducible peaks in ≥ {r['min_reps']} replicates; "
-            f"consensus peaks from DiffBind (union of within-group consensus sets, " + (f"summit ± {r['summits']} bp" if r["summits"] else "merged widths") + "); "
+            f"consensus peaks from DiffBind (union of within-group consensus sets, " + (f"summit ± {diffbind_summits()} bp" if diffbind_summits() else "merged widths") + "); "
             f"log2(CPM + 1) of the counts, {r['method']} correlation, PCA on the {r['pca_top']} most variable peaks" + sex_en,
         ))
     else:
@@ -170,20 +237,34 @@ rule qc_report:
     """单文件 HTML 报告：概览、流程与参数、QC 汇总表（指标说明与参考值见 workflow/report/qc_metrics.yaml）。"""
     input:
         unpack(lambda wc: replicate_report_inputs()),
+        unpack(lambda wc: profile_files()),
+        unpack(lambda wc: fragment_report_inputs()),
         summary="results/qc/summary.tsv",
         multiqc="results/qc/multiqc/multiqc_report.html",
         metrics=workflow.source_path("../report/qc_metrics.yaml"),
         flowchart=workflow.source_path("../../docs/images/bulk_atac_workflow.svg"),
+        flowchart_en=workflow.source_path("../../docs/images/bulk_atac_workflow.en.svg"),
     output:
         "results/qc/report.html",
     params:
         title=("bulk ATAC-seq QC 报告", "bulk ATAC-seq QC report"),
         pipeline="snakemake_bulk_atac",
+        github="https://github.com/Barco-lab/snakemake_bulk_atac",
         version=pipeline_version(Path(workflow.basedir).parent),
         settings=report_settings(),
         qvalue=config["macs3"]["qvalue"],
         multiqc="multiqc/multiqc_report.html",  # 相对 report.html 的路径
         rep_figures=replicate_figures() if replicates_on() else [],
+        profile=dict(
+            figures=profile_figures(),
+            metagene=config["qc"]["metagene_matrix"],
+            min_len=config["qc"]["metagene_min_length"],
+            norm=BW_TAG,
+            controls=False,
+            group_method=BW_GROUP["method"],
+            genome_bin=config["qc"]["genome_bin"],
+            track_bin=config["qc"]["genome_track_bin"],
+        ),
     log:
         "<logs>/qc_report.log",
     localrule: True

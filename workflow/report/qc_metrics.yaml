@@ -6,8 +6,9 @@
 #   ref      参考值
 #   sources  出处，对应下方 sources 的键
 #   digits   显示的小数位数（默认 2）
-#   outlier  true 时与本批样本比较：|值 - 中位数| > 3 x MAD（MAD x 1.4826 换算为标准差尺度）标为橙色
-#   checks   有公开阈值的检查。when 限定样本（按 summary.tsv 的列取值），expr 为 Python 表达式，
+#   outlier  true 时与本批样本比较：|值 - 中位数| > 3 x MAD（MAD x 1.4826 换算为标准差尺度）标为橙色；
+#            只用于没有固定阈值的指标
+#   checks   有固定阈值的检查（有阈值的指标不再按离群提醒）。when 限定样本（按 summary.tsv 的列取值），expr 为 Python 表达式，
 #            可直接使用各列名（不含括号部分）；level 为 warn（橙）或 fail（红）
 # rate 以进入该步骤的 reads 为分母（%，见 summary.tsv 表头括号），与各软件报告和 ENCODE 标准口径一致。
 
@@ -51,7 +52,6 @@ metrics:
     desc: {zh: mapped_reads / clean_reads, en: mapped_reads / clean_reads}
     ref: {zh: "> 95% 为理想，> 80% 可接受", en: "> 95% expected, > 80% acceptable"}
     sources: [ENCODE-ATAC]
-    outlier: true
     checks:
       - expr: mapping_rate < 80
         level: fail
@@ -73,10 +73,13 @@ metrics:
       zh: (filtered_reads − dedup_reads) / filtered_reads，samtools markdup 判定的 PCR 重复比例
       en: (filtered_reads − dedup_reads) / filtered_reads, PCR duplicates flagged by samtools markdup
     ref:
-      zh: 无直接阈值；ENCODE 以 NRF > 0.9、PBC1 > 0.9、PBC2 > 3 衡量文库复杂度（本流程未计算）。偏高提示起始量低或测序过饱和
-      en: No direct cutoff; ENCODE measures complexity by NRF > 0.9, PBC1 > 0.9, PBC2 > 3 (not computed here). High values suggest low input or saturation
+      zh: 超过 50% 时提示（文库复杂度低，有效深度明显少于测序量）。ENCODE 以 NRF > 0.9、PBC1 > 0.9、PBC2 > 3 衡量文库复杂度（本流程未计算）。偏高提示起始量低或测序过饱和
+      en: Flagged above 50% (low library complexity, effective depth well below the sequenced reads). ENCODE measures complexity by NRF > 0.9, PBC1 > 0.9, PBC2 > 3 (not computed here). High values suggest low input or saturation
     sources: [ENCODE-ATAC]
-    outlier: true
+    checks:
+      - expr: duplicates_rate > 50
+        level: warn
+        message: {zh: 重复率超过 50%, en: duplicate rate above 50%}
   peaks:
     desc:
       zh: MACS3 call 出的 peak 数（去除 blacklist 区域后，单个样本）
@@ -93,7 +96,6 @@ metrics:
       en: "> 0.3 expected, > 0.2 acceptable. FRiP depends on the peak-calling threshold; MACS3 q-values here are stricter than ENCODE (p < 0.01), so values are lower"
     sources: [ENCODE-ATAC]
     digits: 4
-    outlier: true
     checks:
       - expr: frip < 0.2
         level: fail
@@ -114,6 +116,22 @@ metrics:
     desc: {zh: clean reads 比对到污染物种的比例, en: Fraction of clean reads aligning to the contaminant genome}
     ref: {zh: 无统一标准，与同批样本比较, en: No consensus threshold; compare within the batch}
     outlier: true
+  subnucleosomal_rate:
+    desc:
+      zh: 去重后 PE 片段中长度 < 120 bp（亚核小体，即 nucleosome-free）的比例（samtools stats，只含最主要的 99% 片段；SE 样本为空）。分布见图 1
+      en: Share of deduplicated PE fragments shorter than 120 bp (sub-nucleosomal, i.e. nucleosome-free; samtools stats, main 99% of fragments; empty for SE). Distribution in Figure 1
+    ref:
+      zh: 无统一阈值。ATAC-seq 中 Tn5 优先切开放 DNA，好的文库以 nucleosome-free 片段为主（通常约一半或更多），并可见单、二核小体的峰；比例明显偏低提示 Tn5 过量、细胞核状态差或死细胞多
+      en: No consensus threshold. In ATAC-seq Tn5 prefers open DNA, so good libraries are dominated by nucleosome-free fragments (often about half or more) with visible mono- and di-nucleosome peaks; a clearly low share suggests excess Tn5, poor nuclei or many dead cells
+    outlier: true
+  size_factor:
+    desc:
+      zh: bigwig 的 DESeq2 size factor（median-of-ratios；括号内 SFpeaks 用 consensus peak 计数，SFbg 用全基因组 bin 计数）。.SFpeaks.bw / .SFbg.bw 为覆盖度除以它
+      en: DESeq2 size factor of the bigwig (median-of-ratios; SFpeaks from consensus peak counts, SFbg from genome-wide bin counts). .SFpeaks.bw / .SFbg.bw are coverage divided by it
+    ref:
+      zh: 全部样本的几何平均为 1。反映测序深度（SFpeaks 还包括信噪比）；假设大多数区域在样本间不变，无法反映全局变化
+      en: Geometric mean of all samples is 1. Reflects sequencing depth (SFpeaks also signal-to-noise); assumes most regions are unchanged, so global changes are not captured
+    outlier: false
 
 # 「重复一致性」一节的表格列（results/qc/replicates/samples.tsv、groups.tsv）；检查规则写在 qc_report.py 中
 replicates:
@@ -166,8 +184,8 @@ replicates:
   x_frac:
     desc: {zh: chrX 的 reads 占全部比对 reads 的百分比, en: Reads on chrX as a percentage of all mapped reads}
     ref:
-      zh: 随细胞类型变化，ATAC 中失活 X 本身可及性低，不用于判定；明显低于同组中位数（> 3 × MAD）时提示
-      en: Varies with cell type and the inactive X is poorly accessible in ATAC, so not used for the call; flagged when well below the group median (> 3 × MAD)
+      zh: 随细胞类型变化，ATAC 中失活 X 本身可及性低，不用于判定，也不提示
+      en: Varies with cell type and the inactive X is poorly accessible in ATAC, so it is neither used for the call nor flagged
     digits: 2
   sex:
     desc: {zh: 推断的性别：F / M / undetermined, en: "Inferred sex: F / M / undetermined"}

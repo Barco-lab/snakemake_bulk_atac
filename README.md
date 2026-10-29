@@ -13,7 +13,7 @@ bulk ATAC-seq 本地分析流程（Snakemake ≥ 9.12）。ChIP-seq / CUT&Tag �
 
 ```
 fastq ─► trim_galore --nextera ─► bowtie2 ─► 过滤（MAPQ≥30、properly paired、去 chrM）─► 去重 ─► macs3 ─► 去除 blacklist ─► FRiP
-             └─ FastQC (raw / trimmed)                                          ├─► bigwig ─► TSS profile / enrichment
+             └─ FastQC (raw / trimmed)                                          ├─► bigwig ─► TSS enrichment、meta gene、全基因组 bin profile
                                                                                 ├─► samtools stats（片段长度、核小体周期）
                                                                                 └─► HOMER motif（可选）
                                      可选：污染检查（比对到其它物种）
@@ -78,9 +78,9 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 | 去重 | `samtools markdup -r` |
 | macs3 | PE：`-f BAMPE --keep-dup all`（直接用片段）<br>SE：`--nomodel --shift -100 --extsize 200`（以 Tn5 切点为中心） |
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
-| bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域 |
-| QC | FRiP、TSS enrichment、片段长度分布（核小体周期）、chrM 比例 |
-| 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；用 DiffBind 求各组组内 consensus（在 ≥ 2 个重复中出现的 reproducible peak），各组取并集为 consensus peak，`dba.count` 以峰顶 ± 200 bp 计数后以 log2(CPM + 1) 计算相关性、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只在组内比较） |
+| bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域；可同时生成多种归一化（含 DESeq2 size factor） |
+| QC | FRiP、TSS enrichment、meta gene profile（TSS 到 TES）、全基因组 bin 信号（沿染色体 / 累积分布）、片段长度分布（核小体周期）与 nucleosome-free 片段比例、chrM 比例 |
+| 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；组间同样用各组 reproducible peak 画 Venn 图（`replicates.group_venn` 指定比较哪些组）；用 DiffBind 求各组组内 consensus（在 ≥ 2 个重复中出现的 reproducible peak），各组取并集为 consensus peak，`dba.count` 以峰顶 ± 200 bp 计数后以 log2(CPM + 1) 计算相关性（散点矩阵，旁边为聚类树）、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只作参考） |
 
 ---
 
@@ -92,11 +92,12 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 | `contamination` | 污染检查：`enabled: true`，`genome` 默认 `hg38`。**本机目前没有人的 bowtie2 index**，打开前需先构建并填入 `references.hg38.bowtie2_index` |
 | `filter.mapq` | 默认 30 |
 | `macs3.qvalue` | 默认 0.01；`macs3.pe` / `macs3.se` 为 PE / SE 的其余参数 |
-| `bigwig.normalize` | `RPGC`（默认）/ `CPM` / `RPKM` / `BPM` / `None`；`bigwig.binsize` 默认 10 |
+| `bigwig.normalize` | 可写一个或多个（列表），每种生成一份 `{sample}.{方式}.bw`，第一个用于 QC 图：`RPGC`（默认）/ `CPM` / `RPKM` / `BPM` / `None`（`bamCoverage --normalizeUsing`）；`deseq2_peaks`（`.SFpeaks.bw`，consensus peak 计数）/ `deseq2_background`（`.SFbg.bw`，全基因组 `bigwig.background_bin` bin 计数，默认 10 kb）为 DESeq2 size factor（median-of-ratios，假设大多数区域在样本间不变），覆盖度除以 size factor，值在 `04_bigwig/size_factors.{SFpeaks,SFbg}.tsv` 与 summary.tsv。`bigwig.binsize` 默认 10。旧版生成的 `{sample}.bw` 可用 `pipeline/utilities/rename_bigwig_norm.py` 改为新命名，不必重算 |
 | `bigwig.group` | 每组一个 bigwig，默认开启；`method: merge`（默认）合并组内去重后的 BAM 再 `bamCoverage`，`mean` 用 `bigwigAverage` 对各重复的 bigwig 取平均（每个重复权重相同）。只生成去掉 `merge: no` 后仍有 ≥ 2 个重复的组。<br>可以先设 `enabled: false` 只跑单个样本，看过重复一致性后标记 `merge` 列、改为 `true` 再运行，只会新增合并这一步；之后修改 `merge` 列也只重做受影响的组 |
 | `motif.enabled` | HOMER，对所有样本的 peak 做 motif 分析；`motif.params: "-nomotif"` 只做已知 motif，速度快很多 |
+| `qc` | `metagene_profile`（protein_coding 基因 TSS 到 TES，`metagene_matrix` 为 computeMatrix 参数）；`genome_profile`（全基因组 bin 信号，`genome_bin` 默认 10 kb，沿染色体的图合并为 `genome_track_bin`，默认 1 Mb） |
 | `keep.raw_bam` | 默认 false：只保留过滤去重后的 BAM |
-| `replicates` | 重复一致性：`enabled`；`min_reps`（reproducible peak 至少出现的重复数，默认 2）；`summits`（DiffBind 计数时取峰顶 ± 多少 bp，默认 200；`false` 保留原宽度）；`method`（`pearson` / `spearman`）；`pca_top`（默认 500）；`sex_check` 与 `y_frac`（默认 `[0.002, 0.01]`：chrY 计数区 reads 占全部比对 reads < 0.002% 判为雌性、> 0.01% 判为雄性） |
+| `replicates` | 重复一致性：`enabled`；`min_reps`（reproducible peak 至少出现的重复数，默认 2）；`summits`（DiffBind 计数时取峰顶 ± 多少 bp，默认 200；`false` 保留原宽度）；`method`（`pearson` / `spearman`）；`pca_top`（默认 500）；`group_venn`（组间 Venn 比较哪些组，留空时 2–4 个组全部比较）；`sex_check` 与 `y_frac`（默认 `[0.002, 0.01]`：chrY 计数区 reads 占全部比对 reads < 0.002% 判为雌性、> 0.01% 判为雄性） |
 | `references.<genome>.y_region` | 性别检查统计的 chrY 区域，即 chrY 去掉 PAR（拟常染色体区，X、Y 上序列相同）：mm10 为 `chrY:1-90000000`（PAR 为 chrY:90745845-91644698，PAR 起点上游雌性也有大量 reads，故多留约 745 kb），hg38 为 PAR1 与 PAR2 之间（`chrY:2781480-56887902`）。该区域仍含与 chrX 同源的扩增序列，雌性样本也有少量 reads，因此按阈值判定 |
 
 参考文件的染色体命名：bowtie2 mm10 index、blacklist 是 UCSC 命名（`chr1`）；fasta / gtf 与 RNA 流程同源
@@ -112,14 +113,16 @@ blacklist 的来源和下载记录见 `~/project/reference/blacklist/download.lo
 project/
 ├── samples.tsv
 ├── results/
-│   ├── qc/report.html                   # ★ QC 报告（单文件）：概览、流程与参数、QC 汇总表、重复一致性；指标说明与参考值见 workflow/report/qc_metrics.yaml
-│   ├── qc/summary.tsv                   # 每个样本的 reads 数、比对率、chrM 比例、重复率、peak 数、FRiP、TSS enrichment（纯数字）
+│   ├── qc/report.html                   # ★ QC 报告（单文件）：概览、流程与参数、QC 汇总表、重复一致性、信号 profile；指标说明与参考值见 workflow/report/qc_metrics.yaml
+│   ├── qc/summary.tsv                   # 每个样本的 reads 数、比对率、chrM 比例、重复率、peak 数、FRiP、TSS enrichment 等（纯数字）
+│   ├── qc/fragment_length.tsv           # PE 样本各片段长度的片段数与占比；图为 qc/figures/fragment_length.（pdf / png / svg）
 │   ├── 03_peaks/{sample}.narrowPeak     # ★ 已去除 blacklist 的 peak
 │   ├── 03_peaks/macs3/{sample}/         # macs3 原始输出（xls、summits 等）
 │   ├── 03_peaks/reproducible/{group}.bed  # 组内至少在 min_reps 个重复中出现的 peak（第 4 列为重复数）
 │   ├── 03_peaks/consensus.bed           # 各组 reproducible peak 的并集（DiffBind，峰顶 ± summits bp）
-│   ├── 04_bigwig/{sample}.bw            # ★
-│   ├── 04_bigwig/groups/{group}.bw      # ★ 每组合并后的 bigwig
+│   ├── 04_bigwig/{sample}.{norm}.bw     # ★ {norm} 为归一化方式（RPGC、CPM、SFpeaks、SFbg 等）
+│   ├── 04_bigwig/groups/{group}.{norm}.bw  # ★ 每组合并后的 bigwig（size factor 方式为组内样本归一化信号的平均）
+│   ├── 04_bigwig/size_factors.{SFpeaks,SFbg}.tsv  # DESeq2 size factor（使用时）
 │   ├── 05_motif/{sample}/               # HOMER（可选）
 │   ├── 02_align/{sample}.dedup.bam      # 过滤去重后的 BAM（{sample}.raw.bam 为 bowtie2 原始比对）；stats/ 下为 flagstat、idxstats、markdup、samtools stats
 │   ├── 01_trim/reports/                 # trim_galore 报告
@@ -128,9 +131,11 @@ project/
 │       ├── multiqc/multiqc_report.html  # ★ 所有 QC 汇总（含片段长度分布）
 │       ├── bowtie2/{sample}.log         # 比对统计
 │       ├── reference_check.txt          # index、blacklist、GTF 染色体命名检查
-│       ├── replicates/                  # 重复一致性：samples.tsv、groups.tsv、peak_overlap.tsv、peak_venn.tsv、correlation.tsv、pca.tsv、
+│       ├── replicates/                  # 重复一致性：samples.tsv、groups.tsv、peak_overlap.tsv、peak_venn.tsv、group_venn.tsv、correlation.tsv、log2cpm.tsv、pca.tsv、
 │       │                                #   peak_counts.tsv（consensus peak 计数矩阵）、diffbind.rds（DBA 对象，可接着做差异分析）；figures/ 下为 PDF、PNG（300 dpi）、SVG
-│       └── fastqc_*/  frip/  deeptools/  contamination/
+│       ├── deeptools/                   # tss_profile、metagene_samples / metagene_groups（meta gene profile；TSV、matrix）、genome_bins.tsv（全基因组 bin 信号）
+│       ├── figures/                     # 报告中的片段长度、meta gene、全基因组 bin 图（PDF、PNG 300 dpi、SVG）
+│       └── fastqc_*/  frip/  contamination/
 └── logs/
     └── run_<时间>/                    # 每执行一次 snakemake 新建一个；续跑时只含这次实际跑了的任务
         ├── <步骤>/<样本>.log          # 出错时先看这里
@@ -152,11 +157,16 @@ project/
 | `clean_rate (% of raw)` | clean_reads / raw_reads | |
 | `mapping_rate (% of clean)` | mapped_reads / clean_reads | > 95% 理想，> 80% 可接受 |
 | `dedup_rate (% of filtered)` | dedup_reads / filtered_reads | dedup_reads：SE ≥ 25M，PE ≥ 50M |
-| `duplicates_rate (% of filtered)` | (filtered_reads − dedup_reads) / filtered_reads | 与同批比较 |
+| `duplicates_rate (% of filtered)` | (filtered_reads − dedup_reads) / filtered_reads | > 50% 时提示 |
 | `mito_rate (chrM) (% of mapped)` | 线粒体 reads / mapped_reads（`filter.mito_name`） | 无统一阈值，与同批比较 |
 | `peaks` / `frip` | peak 数与 FRiP（peak 内 reads / dedup_reads） | FRiP > 0.3 理想，> 0.2 可接受 |
 | `tss_enrichment (±3000bp)` | TSS 中心信号 / 两端背景（按 deeptools profile 估算，窗口由 `qc.tss_matrix` 决定） | 计算方式与 ENCODE 不同，主要用于同批比较 |
 | `contamination_rate (% of clean)` | clean reads 比对到污染物种的比例（仅 `contamination.enabled` 时输出） | |
+| `subnucleosomal_rate (% of fragments < 120bp)` | 去重后 PE 片段中 < 120 bp（nucleosome-free）的比例（samtools stats；SE 为空）；分布图见 `qc/figures/fragment_length.*` | 无统一阈值；好的文库以 nucleosome-free 片段为主 |
+| `size_factor (SFpeaks / SFbg)` | bigwig 的 DESeq2 size factor（仅 `bigwig.normalize` 含 deseq2_* 时输出） | 全部样本的几何平均为 1 |
+
+报告中的标色：有固定阈值的指标（mapping rate、FRiP、dedup reads、重复率 > 50%、性别的 chrY 阈值）只按阈值标色；没有固定阈值的指标（如 chrM 比例、peak 数、TSS enrichment、组内相关性）与同批样本比较，偏离中位数超过 3 × MAD 时标为橙色。
+
 
 ---
 
