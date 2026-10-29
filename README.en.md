@@ -79,7 +79,7 @@ An empty `fq2` means single-end. `run.sh -i` recognises `_1/_2`, `_R1/_R2` and `
 | macs3 | PE: `-f BAMPE --keep-dup all` (uses fragments directly)<br>SE: `--nomodel --shift -100 --extsize 200` (centred on Tn5 cut sites) |
 | peaks | narrowPeak only, ENCODE blacklist regions removed |
 | bigwig | RPGC normalisation and 10 bp bins by default, blacklist regions excluded; several normalizations at once (including DESeq2 size factors) |
-| QC | FRiP, TSS enrichment, meta gene profile (TSS to TES), genome-wide binned signal (along the chromosomes / cumulative), fragment length distribution (nucleosome pattern) and nucleosome-free share, chrM fraction |
+| QC | FRiP, TSS enrichment, meta gene profile (TSS to TES), genome-wide binned signal (along the chromosomes / density), fragment length distribution (nucleosome pattern) and nucleosome-free share, chrM fraction |
 | replicates | Pairwise Jaccard of replicate peaks and Venn diagrams of the bases covered by each replicate combination (bedtools multiinter, groups of 2–4 replicates), and between groups using each group's reproducible peaks (`replicates.group_venn` sets the groups compared); within-group consensus sets from DiffBind (reproducible peaks present in ≥ 2 replicates), merged across groups into consensus peaks and counted with `dba.count` at the summit ± 200 bp, log2(CPM + 1) for correlation (scatter-plot matrix with a dendrogram beside it), clustering and PCA; sex inferred from the fraction of mapped reads on chrX and chrY (called from the chrY region; chrX for reference only) |
 
 ---

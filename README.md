@@ -79,7 +79,7 @@ Naive_rep2  /data/Naive_2_1.fq.gz  /data/Naive_2_2.fq.gz  Naive
 | macs3 | PE：`-f BAMPE --keep-dup all`（直接用片段）<br>SE：`--nomodel --shift -100 --extsize 200`（以 Tn5 切点为中心） |
 | peak | 只做 narrowPeak，去除 ENCODE blacklist 区域 |
 | bigwig | 默认 RPGC 归一化、bin 10bp，并排除 blacklist 区域；可同时生成多种归一化（含 DESeq2 size factor） |
-| QC | FRiP、TSS enrichment、meta gene profile（TSS 到 TES）、全基因组 bin 信号（沿染色体 / 累积分布）、片段长度分布（核小体周期）与 nucleosome-free 片段比例、chrM 比例 |
+| QC | FRiP、TSS enrichment、meta gene profile（TSS 到 TES）、全基因组 bin 信号（沿染色体 / 密度分布）、片段长度分布（核小体周期）与 nucleosome-free 片段比例、chrM 比例 |
 | 重复一致性 | 组内重复两两 peak 的 Jaccard，及各重复组合独有碱基数的 Venn 图（bedtools multiinter，2–4 个重复的组）；组间同样用各组 reproducible peak 画 Venn 图（`replicates.group_venn` 指定比较哪些组）；用 DiffBind 求各组组内 consensus（在 ≥ 2 个重复中出现的 reproducible peak），各组取并集为 consensus peak，`dba.count` 以峰顶 ± 200 bp 计数后以 log2(CPM + 1) 计算相关性（散点矩阵，旁边为聚类树）、层次聚类和 PCA；按 chrX、chrY reads 占全部比对 reads 的比例推断性别（以 chrY 计数区判定，chrX 只作参考） |
 
 ---

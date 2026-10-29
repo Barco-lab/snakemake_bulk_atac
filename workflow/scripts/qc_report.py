@@ -370,19 +370,24 @@ table_html = f'<table class="qc" id="qc" data-key="{esc(p.pipeline)}"><thead><tr
 # 重复一致性
 # ------------------------------------------------------------
 def inline_svg(path, prefix):
-    """内嵌 R 输出的 SVG：去掉 XML 声明和固定尺寸；各图的 id（glyph、clip）加前缀，避免互相冲突。"""
+    """内嵌 R 输出的 SVG：去掉 XML 声明；固定尺寸改为最大宽度（图按原尺寸显示，卡片较窄时缩小，不放大）；
+    各图的 id（glyph、clip）加前缀，避免互相冲突。"""
     t = re.sub(r"^<\?xml[^>]*>\s*", "", Path(path).read_text())
     t = re.sub(r'\bid="([^"]+)"', rf'id="{prefix}-\1"', t)
     t = re.sub(r'((?:xlink:)?href)="#([^"]+)"', rf'\1="#{prefix}-\2"', t)
     t = re.sub(r"url\(#([^)]+)\)", rf"url(#{prefix}-\1)", t)
-    return re.sub(r'(<svg[^>]*?) width="[^"]*" height="[^"]*"', r"\1", t, count=1)
+    m = re.search(r'<svg[^>]*? width="([\d.]+)(?:pt)?" height="[^"]*"', t)
+    style = f' style="max-width: {float(m.group(1)) * 4 / 3:.0f}px"' if m else ""  # R 的 svg 设备以 pt 为单位
+    return re.sub(r'(<svg[^>]*?) width="[^"]*" height="[^"]*"', rf"\1{style}", t, count=1)
 
 
 def fig_img(fig, path, k):
     """散点矩阵的点为位图，内嵌 PNG（位图在 cairo SVG 中的显示因浏览器而异）；其它图内嵌 SVG。"""
     if fig == "correlation_scatter":
-        png = base64.b64encode(Path(path).with_suffix(".png").read_bytes()).decode()
-        return f'<img src="data:image/png;base64,{png}" alt="">'
+        raw = Path(path).with_suffix(".png").read_bytes()
+        w = int.from_bytes(raw[16:20], "big") * 96 / 300  # PNG 为 300 dpi，按原尺寸显示
+        png = base64.b64encode(raw).decode()
+        return f'<img src="data:image/png;base64,{png}" alt="" style="max-width: {w:.0f}px">'
     return inline_svg(path, f"f{k}")
 
 
@@ -704,15 +709,11 @@ if "genome_track" in prof["figures"]:
     ))
     prof_figs.append((
         "genome_distribution",
-        ("全基因组 bin 信号：累积分布", "Genome-wide binned signal: cumulative distribution"),
-        (f"{rep_zh}。{kb(gb)} bin（同上图）按信号从低到高排列，横轴为 bin 的累计比例，纵轴为这些 bin 的信号占全部信号的比例"
-         "（同 deeptools fingerprint 的思路）；虚线为信号完全均匀时的情形。曲线越向右下弯，信号越集中在少数区域："
-         "信噪比好的 ATAC 样本信号集中在开放区域，曲线在右端急剧上升；接近虚线提示背景高（如死细胞、Tn5 过量）。同组重复应基本重合。",
-         f"{rep_en[0].upper() + rep_en[1:]}. The {kb(gb)} bins (as above) are ranked by signal from low to high; the x axis is the cumulative "
-         "share of bins and the y axis the share of all signal they hold (the idea of the deeptools fingerprint); the dashed line is a "
-         "perfectly uniform signal. The more a curve bends to the lower right, the more the signal is concentrated in few regions: "
-         "ATAC samples with good signal-to-noise concentrate their signal in open regions and rise steeply at the right end, while a "
-         "curve close to the diagonal points to high background (e.g. dead cells, excess Tn5). Replicates of a group should largely overlap."),
+        ("全基因组 bin 信号：分布", "Genome-wide binned signal: distribution"),
+        (f"{rep_zh}。横轴为 {kb(gb)} bin（同上图）的 log2(bigwig 平均信号，{prof['norm']} 归一化)，纵轴为密度（R density，默认带宽）；信号为 0 的 bin 不计入，横轴取全部样本的 0.1%–99.9% 分位。"
+         "背景 bin 构成左侧的主峰，开放区域形成右侧的长尾或肩峰；信噪比好的样本右尾更明显，主峰与右尾分得开；右尾很弱、整体集中在一个峰提示背景高（如死细胞、Tn5 过量）。同组重复的曲线应基本重合，形状不同的重复需复核。",
+         f"{rep_en[0].upper() + rep_en[1:]}. The x axis is log2 of the mean bigwig signal of the {kb(gb)} bins (as above; {prof['norm']} normalized) and the y axis the density (R density, default bandwidth); bins without signal are left out and the x axis spans the 0.1–99.9% quantiles of all samples. "
+         "Background bins form the main peak on the left and open regions a long tail or shoulder on the right; samples with good signal-to-noise show a clearer right tail, well separated from the main peak, while a weak tail and a single narrow peak point to high background (e.g. dead cells, excess Tn5). Replicates of a group should largely overlap; review a replicate whose shape differs."),
         "deeptools/genome_bins.tsv",
     ))
 
